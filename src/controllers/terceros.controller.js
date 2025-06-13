@@ -3,37 +3,60 @@ import pool from '../db.js'; // Asegúrate de usar 'import' si tu proyecto está
 
 // Función auxiliar para construir el cuerpo de la query INSERT/UPDATE
 // Esto ayuda a manejar un gran número de columnas de forma más limpia
-const buildTerceroQueryParams = (body) => {
+const buildTerceroQueryParams = (body, isUpdate = false) => { // <-- Añadimos un parámetro 'isUpdate'
     const columns = [
-        'tipo_tercero', 'creado_por_usuario_id', 'nombre_contacto', 'apellido_contacto',
+        'tipo_tercero',
+        'creado_por_usuario_id',
+        'nombre_contacto',
+        'apellido_contacto',
+        'contactos_direcciones',
+        'contacto_telefonos',
+        'contacto_emails',
+        'contacto_urls',
+        'tipo_documento_identificacion',
+        'numero_documento_identificacion',
+        'nombre_comercial_fiscal',
+        'numero_identificacion_fiscal',
+        'responsable_iva_fiscal',
+        'fiscal_tipos_contribuyente',
+        'metodo_pago_bancaria',
+        'nombre_cuenta_bancaria',
+        'numero_cuenta_bancaria',
+        'adj_cedula_url',
+        'adj_cedula_name',
+        'adj_certificado_url',
+        'adj_certificado_name',
+        'adj_rut_name',
+        'adj_rut_url',
+        'adj_prov_camara_comercio_name',
+        'adj_prov_camara_comercio_url',
+        'adj_prov_cert_bancario_name',
+        'adj_prov_cert_bancario_url',
+        'roles',
+        'pagos_recurrentes',
+        'importes_fijos'
+        // 'fecha_creacion', 'fecha_actualizacion' y 'id' son manejados por la DB o por lógica específica
+    ];
+
+    // Para actualizaciones, también incluimos actualizado_por_usuario_id
+    if (isUpdate) {
+        columns.push('actualizado_por_usuario_id'); // <-- ¡AÑADIDO PARA UPDATE!
+    }
+
+    const jsonbFields = [
         'contactos_direcciones', 'contacto_telefonos', 'contacto_emails', 'contacto_urls',
-        'tipo_documento_identificacion', 'numero_documento_identificacion',
-        'nombre_comercial_fiscal', 'numero_identificacion_fiscal', 'responsable_iva_fiscal',
-        'fiscal_tipos_contribuyente', 'metodo_pago_bancaria', 'nombre_cuenta_bancaria',
-        'numero_cuenta_bancaria', 'adj_cedula_url', 'adj_cedula_name', 'adj_certificado_url',
-        'adj_certificado_name', 'adj_rut_name', 'adj_rut_url', 'adj_prov_camara_comercio_name',
-        'adj_prov_camara_comercio_url', 'adj_prov_cert_bancario_name', 'adj_prov_cert_bancario_url',
-        'roles', 'pagos_recurrentes', 'importes_fijos'
+        'fiscal_tipos_contribuyente', 'roles', 'pagos_recurrentes', 'importes_fijos'
     ];
 
     const values = columns.map(col => {
-        // Identificar los campos que son de tipo JSONB en tu tabla
-        const jsonbFields = [
-            'contactos_direcciones', 'contacto_telefonos', 'contacto_emails', 'contacto_urls',
-            'fiscal_tipos_contribuyente', 'roles', 'pagos_recurrentes', 'importes_fijos'
-        ];
-
-        // Si el campo es un JSONB y el valor no es null/undefined, serializarlo
         if (jsonbFields.includes(col) && (body[col] !== null && typeof body[col] !== 'undefined')) {
             return JSON.stringify(body[col]);
         }
-        // Para otros campos, devolver el valor tal cual
         return body[col];
     });
 
     return { columns, values };
 };
-
 
 // Obtener todos los terceros (con filtro opcional por tipo_tercero)
 export const getAllTerceros = async (req, res) => {
@@ -46,6 +69,12 @@ export const getAllTerceros = async (req, res) => {
             query += ' WHERE tipo_tercero = $1';
             params.push(tipo_tercero);
         }
+
+        // Añadir la cláusula ORDER BY al final de la consulta
+        // Ordenamos por fecha_creacion de forma descendente (más reciente primero),
+        // y luego por nombre_contacto alfabéticamente como un segundo criterio.
+        // Puedes ajustar el orden o las columnas según tu preferencia.
+        query += ' ORDER BY fecha_creacion DESC, nombre_contacto ASC'; // Orden predeterminado
 
         const result = await pool.query(query, params);
         res.status(200).json(result.rows);
@@ -105,26 +134,32 @@ export const createTercero = async (req, res) => {
     }
 };
 
-// Actualizar un tercero
+//Actualizar un tercero
 export const updateTercero = async (req, res) => {
     try {
         const { id } = req.params;
         const {
-            tipo_tercero, nombre_contacto, numero_documento_identificacion // Campos obligatorios para validación básica
-            // ... el resto de campos vienen en req.body y se mapean en buildTerceroQueryParams
+            tipo_tercero, nombre_contacto, numero_documento_identificacion, // Campos obligatorios para validación
+            actualizado_por_usuario_id // <-- ¡AÑADIDO PARA LA VALIDACIÓN Y USO!
         } = req.body;
 
-        // Validación básica
+        // Validación básica (puedes expandirla con Joi/Yup)
         if (!tipo_tercero || !nombre_contacto || !numero_documento_identificacion) {
             return res.status(400).json({ message: 'Los campos tipo_tercero, nombre_contacto y numero_documento_identificacion son obligatorios.' });
         }
+        // Validar que se envíe el ID del usuario que actualiza
+        if (!actualizado_por_usuario_id) {
+            return res.status(400).json({ message: 'El campo actualizado_por_usuario_id es obligatorio para la actualización.' });
+        }
 
-        const { columns, values } = buildTerceroQueryParams(req.body);
+        // Llamamos a buildTerceroQueryParams con 'true' para indicar que es una actualización
+        const { columns, values } = buildTerceroQueryParams(req.body, true); // <-- PASAMOS 'true'
 
         // Generar el SET dinámicamente para la query UPDATE
+        // Aseguramos que 'actualizado_por_usuario_id' se incluya aquí
         const setClauses = columns.map((col, i) => `${col} = $${i + 1}`).join(', ');
 
-        // Añadir fecha_actualizacion al final del SET y el ID como último parámetro
+        // Añadir el ID del tercero al final de los valores
         const updateQueryText = `
             UPDATE terceros SET
                 ${setClauses},
@@ -133,7 +168,7 @@ export const updateTercero = async (req, res) => {
             RETURNING *;
         `;
 
-        const updateValues = [...values, id]; // Añadir el ID al final de los valores
+        const updateValues = [...values, id]; // Añadir el ID del tercero al final de los valores
 
         const result = await pool.query(updateQueryText, updateValues);
 
@@ -147,6 +182,7 @@ export const updateTercero = async (req, res) => {
         res.status(500).json({ message: 'Error interno del servidor', error: error.message });
     }
 };
+
 
 // Eliminar un tercero
 export const deleteTercero = async (req, res) => {
