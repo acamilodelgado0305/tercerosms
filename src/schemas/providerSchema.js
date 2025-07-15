@@ -1,4 +1,4 @@
-import { ru } from 'date-fns/locale';
+
 import Joi from 'joi';
 
 const providerSchema = Joi.object({
