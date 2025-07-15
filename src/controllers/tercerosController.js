@@ -1,5 +1,5 @@
 import pool from '../database.js'; // Adjust this path to your actual DB connection pool for the 'terceros' database.
-import { v4 as uuidv4 } from 'uuid'; // uuidv4 is not strictly needed for GET operations, but kept for consistency if other methods are in this file.
+
 
 /**
  * @function getAllTerceros
