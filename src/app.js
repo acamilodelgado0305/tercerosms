@@ -2,9 +2,9 @@ import express from 'express';
 import http from 'http';
 import dotenv from 'dotenv';
 import cors from 'cors';
-import tercerposRoutes from './routes/terceros.routes.js';
-
-
+import CajerosRouter from './routes/cajero.routes.js';
+import ProviderRouter from './routes/providers.routes.js'
+import TercerosRouter from './routes/tercerosRoutes.js'
 
 
 dotenv.config();
@@ -16,22 +16,14 @@ app.use(express.json());
 
 // Configuración de CORS (para aceptar peticiones de tu frontend)
 app.use(cors({
-    origin: ['http://localhost:5173', 'https://ispsuite.app.la-net.co', 'https://ispsuitedev.app.la-net.co'],
+    origin: ['http://localhost:5173', 'https://ispsuite.app.la-net.co', 'https://ispsuitedev.app.la-net.co','http://localhost:3002' ],
     credentials: true,
 }));
 
-// Usamos las rutas de usuarios y notificaciones
 
-
-
-// Servir archivos estáticos si es necesario
-// Asegúrate de configurar correctamente el directorio de archivos estáticos si lo necesitas
-
-
-
-app.use("/api/v1/terceros", tercerposRoutes);
-
-// Crear la instancia de Socket.io usando la función 'createSocketServer' y asociarla al servidor HTTP
+app.use("/api", CajerosRouter);
+app.use("/api", ProviderRouter);
+app.use("/api", TercerosRouter);
 
 
 // Inicia el servidor HTTP
