@@ -16,7 +16,7 @@ app.use(express.json());
 
 // Configuración de CORS (para aceptar peticiones de tu frontend)
 app.use(cors({
-    origin: ['http://localhost:5173', 'https://ispsuite.app.la-net.co', 'https://ispsuitedev.app.la-net.co','http://localhost:3002' ],
+    origin: ['http://localhost:5173', 'https://ispsuite.app.la-net.co', 'https://ispsuitedev.app.la-net.co','http://localhost:3002', 'https://backdev.app.la-net.co' ],
     credentials: true,
 }));
 
