@@ -7,7 +7,8 @@ import {
     getTerceroById,
     updateTercero, // Import the new update function
     deleteTercero,
-    getTercerosSummary // Import the new delete function
+    getTercerosSummary,
+    getTerceros,
 } from "../controllers/tercerosController.js"; // *** Crucial: Ensure '.js' extension here ***
 
 const router = express.Router();
@@ -18,6 +19,8 @@ const router = express.Router();
 router.get("/terceros/summary", getTercerosSummary); 
 
 router.get("/terceros", getAllTerceros);
+router.get("/allterceros", getTerceros);
+
 
 // 2. Get a single tercero by ID
 

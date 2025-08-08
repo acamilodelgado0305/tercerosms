@@ -235,6 +235,122 @@ export const getAllTerceros = async (req, res) => {
     }
 };
 
+export const getTerceros = async (req, res) => {
+    let client;
+    try {
+        // 1. Conectar al pool de la base de datos.
+        client = await pool.connect();
+
+        // 2. Query simple y directa: Selecciona todas las columnas (*) de la tabla.
+        // Se añade un ORDER BY para mantener un orden predecible, lo cual es una buena práctica incluso en volcados de datos.
+        const dataQuery = `
+            SELECT 
+                id, nombre, tipo, tipo_identificacion, numero_identificacion
+            FROM 
+                public.terceros
+            ORDER BY 
+                nombre ASC;
+        `;
+
+        const dataResult = await client.query(dataQuery);
+
+        // 3. Enviar una respuesta directa con todos los datos.
+        // No hay objeto de paginación porque no aplica.
+        res.status(200).json({
+            message: 'Todos los terceros han sido obtenidos exitosamente (sin paginación).',
+            totalItems: dataResult.rowCount, // Es útil saber cuántos registros se trajeron.
+            data: dataResult.rows,
+        });
+
+    } catch (error) {
+        // El manejo de errores se mantiene robusto.
+        console.error('Error in getAllTercerosParaPrueba:', error);
+        res.status(500).json({ 
+            error: 'Ocurrió un error inesperado al obtener los terceros.', 
+            details: error.message 
+        });
+    } finally {
+        // La liberación del cliente es crucial y se mantiene.
+        if (client) {
+            client.release();
+        }
+    }
+};
+
+export const getAllCajeros = async (req, res) => {
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 25;
+    const offset = (page - 1) * limit;
+
+    let client;
+    try {
+        client = await pool.connect();
+
+        const totalQuery = `
+            SELECT COUNT(*)
+            FROM public.terceros t
+            INNER JOIN public.cajeros c ON t.id = c.id_cajero
+            WHERE t.tipo = 'cajero';
+        `;
+        const totalResult = await client.query(totalQuery);
+        const totalItems = parseInt(totalResult.rows[0].count, 10);
+        const totalPages = Math.ceil(totalItems / limit);
+
+        // ===== CONSULTA CORREGIDA =====
+       
+        // 'ciudad', 'departamento' y 'pais' se obtienen de 't' (terceros).
+        const dataQuery = `
+            SELECT
+                t.id,
+                t.nombre,
+                t.direccion,
+                t.ciudad,
+                t.departamento,
+                t.pais,
+                t.telefono,
+                t.correo,
+                c.responsable AS responsable_cajero,
+                c.comision_porcentaje,
+                c.activo,
+                c.observaciones,
+                c.importe_personalizado,
+                c.nombre AS nombre_asignado_cajero
+            FROM
+                public.terceros t
+            INNER JOIN
+                public.cajeros c ON t.id = c.id_cajero
+            WHERE
+                t.tipo = 'cajero'
+            ORDER BY
+                t.nombre ASC
+            LIMIT $1 OFFSET $2;
+        `;
+
+        const dataResult = await client.query(dataQuery, [limit, offset]);
+
+        res.status(200).json({
+            message: 'Cajeros obtenidos exitosamente.',
+            data: dataResult.rows,
+            pagination: {
+                currentPage: page,
+                pageSize: limit,
+                totalItems,
+                totalPages,
+            },
+        });
+
+    } catch (error) {
+        console.error('Error en getAllCajeros:', error);
+        res.status(500).json({
+            error: 'Ocurrió un error inesperado al obtener los cajeros.',
+            details: error.message
+        });
+    } finally {
+        if (client) {
+            client.release();
+        }
+    }
+};
 
 export const getTerceroById = async (req, res) => {
     const { id } = req.params;
