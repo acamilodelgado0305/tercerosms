@@ -101,104 +101,148 @@ export const createCajero = async (req, res) => {
 
 // 2. OBTENER TODOS LOS CAJEROS
 export const getAllCajeros = async (req, res) => {
-  try {
-    const query = `
-      SELECT 
-        c.id_cajero,
-        c.nombre,
-        c.responsable,
-        c.municipio,
-        c.direccion,
-        c.comision_porcentaje,
-        c.observaciones,
-        c.activo,
-        json_agg(
-          json_build_object(
-            'id_importe', ip.id_importe,
-            'producto', ip.producto,
-            'accion', ip.accion,
-            'valor', ip.valor
-          )
-        ) FILTER (WHERE ip.id_importe IS NOT NULL) AS importes_personalizados
-      FROM cajeros c
-      LEFT JOIN importes_personalizados ip ON c.id_cajero = ip.id_cajero
-      GROUP BY c.id_cajero, c.nombre, c.responsable, c.municipio, c.direccion, c.comision_porcentaje, c.observaciones, c.activo;
-    `;
-    const result = await pool.query(query);
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 25;
+    const offset = (page - 1) * limit;
 
-    // Si no hay importes personalizados, json_agg devuelve null; lo convertimos a un arreglo vacío
-    const cajeros = result.rows.map(cajero => ({
-      ...cajero,
-      importes_personalizados: cajero.importes_personalizados || [],
-    }));
+    let client;
+    try {
+        client = await pool.connect();
 
-    res.status(200).json({
-      message: 'Cajeros obtenidos exitosamente',
-      data: cajeros,
-    });
-  } catch (error) {
-    console.error('Error en getAllCajeros:', error);
-    res.status(500).json({
-      error: 'Error interno del servidor',
-      details: error.message,
-    });
-  }
+        const totalQuery = `
+            SELECT COUNT(*)
+            FROM public.terceros t
+            INNER JOIN public.cajeros c ON t.id = c.id_cajero
+            WHERE t.tipo = 'cajero';
+        `;
+        const totalResult = await client.query(totalQuery);
+        const totalItems = parseInt(totalResult.rows[0].count, 10);
+        const totalPages = Math.ceil(totalItems / limit);
+
+        // ===== CONSULTA CORREGIDA =====
+       
+        // 'ciudad', 'departamento' y 'pais' se obtienen de 't' (terceros).
+        const dataQuery = `
+            SELECT
+                t.id,
+                t.nombre,
+                t.direccion,
+                t.ciudad,
+                t.departamento,
+                t.pais,
+                t.telefono,
+                t.correo,
+                c.responsable AS responsable_cajero,
+                c.comision_porcentaje,
+                c.activo,
+                c.observaciones,
+                c.importe_personalizado,
+                c.nombre AS nombre_asignado_cajero
+            FROM
+                public.terceros t
+            INNER JOIN
+                public.cajeros c ON t.id = c.id_cajero
+            WHERE
+                t.tipo = 'cajero'
+            ORDER BY
+                t.nombre ASC
+            LIMIT $1 OFFSET $2;
+        `;
+
+        const dataResult = await client.query(dataQuery, [limit, offset]);
+
+        res.status(200).json({
+            message: 'Cajeros obtenidos exitosamente.',
+            data: dataResult.rows,
+            pagination: {
+                currentPage: page,
+                pageSize: limit,
+                totalItems,
+                totalPages,
+            },
+        });
+
+    } catch (error) {
+        console.error('Error en getAllCajeros:', error);
+        res.status(500).json({
+            error: 'Ocurrió un error inesperado al obtener los cajeros.',
+            details: error.message
+        });
+    } finally {
+        if (client) {
+            client.release();
+        }
+    }
 };
 
 // 3. OBTENER UN CAJERO POR ID
 export const getCajeroById = async (req, res) => {
-  const { id } = req.params; // Obtener el ID del cajero desde los parámetros de la URL
+    // 1. OBTENER Y VALIDAR EL ID DE LOS PARÁMETROS DE LA RUTA
+    const { id } = req.params;
 
-  try {
-    const query = `
-      SELECT 
-        c.id_cajero,
-        c.nombre,
-        c.responsable,
-        c.municipio,
-        c.direccion,
-        c.comision_porcentaje,
-        c.observaciones,
-        c.activo,
-        json_agg(
-          json_build_object(
-            'id_importe', ip.id_importe,
-            'producto', ip.producto,
-            'accion', ip.accion,
-            'valor', ip.valor
-          )
-        ) FILTER (WHERE ip.id_importe IS NOT NULL) AS importes_personalizados
-      FROM cajeros c
-      LEFT JOIN importes_personalizados ip ON c.id_cajero = ip.id_cajero
-      WHERE c.id_cajero = $1
-      GROUP BY c.id_cajero, c.nombre, c.responsable, c.municipio, c.direccion, c.comision_porcentaje, c.observaciones, c.activo;
-    `;
-    const result = await pool.query(query, [id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: 'Cajero no encontrado',
-        details: `No se encontró un cajero con el ID: ${id}`,
-      });
+    // Opcional pero recomendado: Validar si el ID tiene formato de UUID
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(id)) {
+        return res.status(400).json({ error: 'El ID proporcionado no es un UUID válido.' });
     }
 
-    // Asegurar que importes_personalizados sea un arreglo vacío si no hay datos
-    const cajero = {
-      ...result.rows[0],
-      importes_personalizados: result.rows[0].importes_personalizados || [],
-    };
+    let client;
+    try {
+        client = await pool.connect();
 
-    res.status(200).json({
-      message: 'Cajero obtenido exitosamente',
-      data: cajero,
-    });
-  } catch (error) {
-    console.error('Error en getCajeroById:', error);
-    res.status(500).json({
-      error: 'Error interno del servidor',
-      details: error.message,
-    });
-  }
+        // 2. CONSTRUIR LA CONSULTA SQL PARAMETRIZADA
+        // Usamos $1 como placeholder para el ID. Esto previene inyecciones SQL.
+        const dataQuery = `
+            SELECT
+                t.id,
+                t.nombre,
+                t.direccion,
+                t.ciudad,
+                t.departamento,
+                t.pais,
+                t.telefono,
+                t.correo,
+                c.responsable AS responsable_cajero,
+                c.comision_porcentaje,
+                c.activo,
+                c.observaciones,
+                c.importe_personalizado,
+                c.nombre AS nombre_asignado_cajero
+            FROM
+                public.terceros t
+            INNER JOIN
+                public.cajeros c ON t.id = c.id_cajero
+            WHERE
+                t.id = $1 AND t.tipo = 'cajero' -- Doble condición para mayor seguridad e integridad
+            LIMIT 1; -- Buena práctica para indicar que solo esperamos un resultado
+        `;
+
+        // 3. EJECUTAR LA CONSULTA PASANDO EL ID COMO PARÁMETRO
+        const dataResult = await client.query(dataQuery, [id]);
+
+        // 4. MANEJAR LA RESPUESTA
+        // Si no se encontraron filas, el cajero no existe.
+        if (dataResult.rowCount === 0) {
+            return res.status(404).json({ message: 'No se encontró un cajero con el ID proporcionado.' });
+        }
+
+        // Si se encontró, devolver el primer (y único) registro.
+        res.status(200).json({
+            message: 'Cajero obtenido exitosamente.',
+            data: dataResult.rows[0],
+        });
+
+    } catch (error) {
+        console.error(`Error en getCajeroById para el ID ${id}:`, error);
+        res.status(500).json({
+            error: 'Ocurrió un error inesperado al obtener el cajero.',
+            details: error.message
+        });
+    } finally {
+        if (client) {
+            client.release();
+        }
+    }
 };
 
 export const updateCajero = async (req, res) => {
