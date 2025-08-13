@@ -51,12 +51,10 @@ const fetchFullTerceroById = async (id, client) => {
 
 
 export const createTercero = async (req, res) => {
-    // 1. Iniciar conexión y transacción
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // 2. Desestructurar datos de la petición
         const {
             nombre, tipo, tipo_identificacion, numero_identificacion,
             direccion, ciudad, departamento, pais,
@@ -64,76 +62,65 @@ export const createTercero = async (req, res) => {
             ...specificData
         } = req.body;
 
-        // 3. Validación
         if (!nombre || !tipo) {
-            return res.status(400).json({ error: 'El nombre del tercero y el tipo (cajero, proveedor, rrhh) son obligatorios.' });
+            return res.status(400).json({ error: 'El nombre y el tipo del tercero son obligatorios.' });
         }
 
         const idTercero = uuidv4();
 
-        // 4. Inserción en 'terceros'
+        // 1. Inserción en 'terceros'
         const queryTercero = `
-            INSERT INTO public.terceros (
-                id, nombre, tipo, tipo_identificacion, numero_identificacion,
-                direccion, ciudad, departamento, pais, telefono, correo
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            RETURNING *;
+            INSERT INTO public.terceros (id, nombre, tipo, tipo_identificacion, numero_identificacion, direccion, ciudad, departamento, pais, telefono, correo)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *;
         `;
-
+        
+        // CORRECCIÓN: Se eliminó JSON.stringify. Pasamos los objetos directamente.
         const valuesTercero = [
             idTercero, nombre, tipo,
             tipo_identificacion || null, numero_identificacion || null,
             direccion || null, ciudad || null, departamento || null, pais || null,
-            JSON.stringify(telefono || {}), JSON.stringify(correo || {})
+            telefono || {}, correo || {}
         ];
 
-        const resultTercero = await client.query(queryTercero, valuesTercero);
-        const newTercero = resultTercero.rows[0];
+        const { rows: [newTercero] } = await client.query(queryTercero, valuesTercero);
 
-        // 5. Lógica condicional para insertar en la tabla de rol específica
-        let relatedData = null;
-
+        // 2. Inserción en tablas de detalles
+        let details = {};
         if (tipo === 'cajero') {
-            const { responsable, comision_porcentaje, activo = true, observaciones, nombre: nombre_cajero, importe_personalizado = false } = specificData;
+            const { responsable, comision_porcentaje, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
             const queryCajero = `
                 INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado)
                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
-            `; //
+            `;
             const valuesCajero = [idTercero, responsable || nombre, comision_porcentaje || 0, activo, observaciones, nombre_cajero || nombre, importe_personalizado];
-            const resultCajero = await client.query(queryCajero, valuesCajero);
-            relatedData = resultCajero.rows[0];
-
+            const { rows: [result] } = await client.query(queryCajero, valuesCajero);
+            details = result;
         } else if (tipo === 'proveedor') {
             const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal } = specificData;
             const queryProveedor = `
                 INSERT INTO public.proveedores (id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *;
-            `; //
-            const valuesProveedor = [idTercero, otros_documentos || null, sitioweb || null, camara_comercio || null, rut || null, certificado_bancario || null, medio_pago || null, responsable_iva || null, JSON.stringify(responsabilidad_fiscal || [])];
-            const resultProveedor = await client.query(queryProveedor, valuesProveedor);
-            relatedData = resultProveedor.rows[0];
-
+            `;
+            // CORRECCIÓN: Se eliminó JSON.stringify.
+            const valuesProveedor = [idTercero, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal || []];
+            const { rows: [result] } = await client.query(queryProveedor, valuesProveedor);
+            details = result;
         } else if (tipo === 'rrhh') {
             const { rut, certificado_bancario, medio_pago, cargo } = specificData;
             const queryRrhh = `
                 INSERT INTO public.rrhh (id, rut, certificado_bancario, medio_pago, cargo)
                 VALUES ($1, $2, $3, $4, $5) RETURNING *;
-            `; //
-            const valuesRrhh = [idTercero, rut || null, certificado_bancario || null, medio_pago || null, cargo || null];
-            const resultRrhh = await client.query(queryRrhh, valuesRrhh);
-            relatedData = resultRrhh.rows[0];
+            `;
+            const valuesRrhh = [idTercero, rut, certificado_bancario, medio_pago, cargo];
+            const { rows: [result] } = await client.query(queryRrhh, valuesRrhh);
+            details = result;
         }
 
-        // 6. Confirmar la transacción
         await client.query('COMMIT');
 
         res.status(201).json({
             message: `Tercero de tipo '${tipo}' creado exitosamente.`,
-            data: {
-                tercero: newTercero,
-                details: relatedData
-            },
+            data: { ...newTercero, ...details } // Enviamos una respuesta plana y combinada
         });
 
     } catch (error) {
@@ -141,9 +128,7 @@ export const createTercero = async (req, res) => {
         console.error('Error en createTercero:', error);
         res.status(500).json({ error: 'Error interno del servidor al crear el tercero.', details: error.message });
     } finally {
-        if (client) {
-            client.release();
-        }
+        if (client) client.release();
     }
 };
 
@@ -354,19 +339,49 @@ export const getAllCajeros = async (req, res) => {
 
 export const getTerceroById = async (req, res) => {
     const { id } = req.params;
-    let client;
-    try {
-        client = await pool.connect();
-        const fullTerceroData = await fetchFullTerceroById(id, client);
+    const client = await pool.connect();
 
-        if (!fullTerceroData) {
+    try {
+        // Tu consulta es eficiente, la mantenemos. Trae todos los datos de una vez.
+        const query = `
+            SELECT
+                t.*,
+                c.responsable, c.comision_porcentaje, c.activo, c.observaciones, c.nombre as nombre_cajero, c.importe_personalizado,
+                p.otros_documentos, p.sitioweb, p.camara_comercio, p.rut as proveedor_rut, p.certificado_bancario as proveedor_cb, p.medio_pago as proveedor_mp, p.responsable_iva, p.responsabilidad_fiscal,
+                h.cargo, h.rut as rrhh_rut, h.certificado_bancario as rrhh_cb, h.medio_pago as rrhh_mp
+            FROM public.terceros t
+            LEFT JOIN public.cajeros c ON t.id = c.id_cajero
+            LEFT JOIN public.proveedores p ON t.id = p.id
+            LEFT JOIN public.rrhh h ON t.id = h.id
+            WHERE t.id = $1;
+        `;
+        
+        const { rows: [fullData] } = await client.query(query, [id]);
+
+        if (!fullData) {
             return res.status(404).json({ error: 'Tercero no encontrado' });
+        }
+
+        // CORRECCIÓN: Procesamos 'fullData' para enviarlo como un solo objeto plano.
+        // El frontend ya no necesitará separar 'tercero' de 'details'.
+        
+        // Renombramos los campos que tienen el mismo nombre en diferentes tablas (ej. 'rut')
+        // para que no se sobreescriban en el objeto final.
+        if (fullData.tipo === 'proveedor') {
+            fullData.rut = fullData.proveedor_rut;
+            fullData.certificado_bancario = fullData.proveedor_cb;
+            fullData.medio_pago = fullData.proveedor_mp;
+        } else if (fullData.tipo === 'rrhh') {
+            fullData.rut = fullData.rrhh_rut;
+            fullData.certificado_bancario = fullData.rrhh_cb;
+            fullData.medio_pago = fullData.rrhh_mp;
         }
 
         res.status(200).json({
             message: 'Tercero obtenido exitosamente',
-            data: fullTerceroData,
+            data: fullData, // Enviamos el objeto plano directamente.
         });
+
     } catch (error) {
         console.error('Error in getTerceroById:', error);
         res.status(500).json({ error: 'Error interno del servidor', details: error.message });
@@ -377,12 +392,42 @@ export const getTerceroById = async (req, res) => {
 
 
 // Función auxiliar para construir consultas de actualización dinámicas de forma segura
+// En algún archivo de utilidades o al inicio de tu controlador
+const TERCERO_COLUMNS = ['nombre', 'tipo', 'tipo_identificacion', 'numero_identificacion', 'direccion', 'ciudad', 'telefono', 'correo', 'pais', 'departamento'];
+const CAJERO_COLUMNS = ['nombre', 'responsable', 'comision_porcentaje', 'activo', 'observaciones', 'importe_personalizado'];
+const PROVEEDOR_COLUMNS = ['otros_documentos', 'sitioweb', 'camara_comercio', 'rut', 'certificado_bancario', 'medio_pago', 'responsable_iva', 'responsabilidad_fiscal'];
+const RRHH_COLUMNS = ['rut', 'certificado_bancario', 'medio_pago', 'cargo'];
+
+// Función auxiliar para construir el objeto de datos para una tabla específica
+const extractFieldsForTable = (body, columns) => {
+    const data = {};
+    for (const col of columns) {
+        if (body[col] !== undefined) {
+            data[col] = body[col];
+        }
+    }
+    return data;
+};
+
+const getTerceroTypeDetails = (type) => {
+    switch (type) {
+        case 'cajero': return { tableName: 'cajeros', idField: 'id_cajero', columns: CAJERO_COLUMNS };
+        case 'proveedor': return { tableName: 'proveedores', idField: 'id', columns: PROVEEDOR_COLUMNS };
+        case 'rrhh': return { tableName: 'rrhh', idField: 'id', columns: RRHH_COLUMNS };
+        default: return null;
+    }
+};
+
+// Función para construir la consulta de actualización
 const buildUpdateQuery = (table, fields, idField = 'id') => {
     const setClause = Object.keys(fields).map((key, index) => `"${key}" = $${index + 1}`).join(', ');
     const values = Object.values(fields);
     const query = `UPDATE public.${table} SET ${setClause} WHERE "${idField}" = $${values.length + 1} RETURNING *;`;
     return { query, values };
 };
+
+
+
 
 export const updateTercero = async (req, res) => {
     const { id } = req.params;
@@ -391,65 +436,111 @@ export const updateTercero = async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const { rows: [currentTercero] } = await client.query('SELECT tipo FROM public.terceros WHERE id = $1', [id]);
+        // 1. OBTENER ESTADO ACTUAL DEL TERCERO
+        const { rows: [currentTercero] } = await client.query('SELECT * FROM public.terceros WHERE id = $1 FOR UPDATE', [id]);
         if (!currentTercero) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'Tercero no encontrado' });
         }
-        const currentType = currentTercero.tipo;
-
-        const terceroFields = {};
-        const specificFields = {};
-        const terceroColumns = ['nombre', 'tipo_identificacion', 'numero_identificacion', 'direccion', 'ciudad', 'departamento', 'pais', 'telefono', 'correo'];
-
-        for (const key in req.body) {
-            if (terceroColumns.includes(key)) {
-                terceroFields[key] = req.body[key];
-            } else if (key !== 'tipo') { // Ignoramos 'tipo' para la actualización simple
-                specificFields[key] = req.body[key];
-            }
-        }
         
-        if (terceroFields.telefono) terceroFields.telefono = JSON.stringify(terceroFields.telefono || {});
-        if (terceroFields.correo) terceroFields.correo = JSON.stringify(terceroFields.correo || {});
+        const currentType = currentTercero.tipo;
+        const newType = req.body.tipo;
 
-        // 1. Actualizar la tabla 'terceros' si hay campos para ello
-        if (Object.keys(terceroFields).length > 0) {
-            const { query, values } = buildUpdateQuery('terceros', terceroFields);
-            await client.query(query, [...values, id]);
+        // 2. ACTUALIZAR LA TABLA PRINCIPAL 'terceros'
+        // Mapeamos el nombre del cajero si viene en el payload.
+        if (newType === 'cajero' && req.body.nombre_cajero) {
+            req.body.nombre = req.body.nombre_cajero;
         }
 
-        // 2. Actualizar la tabla de rol específica si hay campos para ello
-        if (Object.keys(specificFields).length > 0) {
-            let tableName, idField;
-            switch (currentType) {
-                case 'cajero': tableName = 'cajeros'; idField = 'id_cajero'; break;
-                case 'proveedor': tableName = 'proveedores'; idField = 'id'; break;
-                case 'rrhh': tableName = 'rrhh'; idField = 'id'; break;
-                default: throw new Error(`Tipo desconocido para actualizar: ${currentType}`);
+        const terceroDataToUpdate = extractFieldsForTable(req.body, TERCERO_COLUMNS);
+        terceroDataToUpdate.tipo = newType || currentType;
+
+        const { query: updateTerceroQuery, values: terceroValues } = buildUpdateQuery('terceros', terceroDataToUpdate, 'id');
+        await client.query(updateTerceroQuery, [...terceroValues, id]);
+
+        // 3. LÓGICA DE MANEJO DE DETALLES (SI HAY CAMBIO DE TIPO)
+        if (newType && newType !== currentType) {
+            // 3A. Eliminar el registro de la tabla de detalles ANTIGUA
+            const oldDetailsInfo = getTerceroTypeDetails(currentType);
+            if (oldDetailsInfo) {
+                await client.query(`DELETE FROM public.${oldDetailsInfo.tableName} WHERE ${oldDetailsInfo.idField} = $1`, [id]);
             }
-            const { query, values } = buildUpdateQuery(tableName, specificFields, idField);
-            await client.query(query, [...values, id]);
-        }
 
-        // 3. Obtener y devolver el estado final del tercero completo
-        const finalTerceroData = await fetchFullTerceroById(id, client);
+            // 3B. Crear un nuevo registro en la tabla de detalles NUEVA
+            const newDetailsInfo = getTerceroTypeDetails(newType);
+            if (newDetailsInfo) {
+                const dataForNewDetails = extractFieldsForTable(req.body, newDetailsInfo.columns);
+                
+                const finalDataForInsert = {
+                    [newDetailsInfo.idField]: id,
+                    ...dataForNewDetails
+                };
+
+                const columns = Object.keys(finalDataForInsert);
+                const values = Object.values(finalDataForInsert);
+                // Aquí creamos el string de placeholders, como "$1, $2, $3"
+                const valuesPlaceholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+
+                // ===== INICIO DE LA CORRECCIÓN =====
+                // El error estaba aquí. Usamos la variable 'valuesPlaceholders' directamente,
+                // porque ya es un string y no necesita otro .join().
+                const insertQuery = `INSERT INTO public.${newDetailsInfo.tableName} (${columns.join(', ')}) VALUES (${valuesPlaceholders})`;
+                // ===== FIN DE LA CORRECCIÓN =====
+
+                await client.query(insertQuery, values);
+            }
+        } else {
+            // 4. LÓGICA DE ACTUALIZACIÓN SIMPLE (SIN CAMBIO DE TIPO)
+            const detailsInfo = getTerceroTypeDetails(currentType);
+            if (detailsInfo) {
+                const detailsDataToUpdate = extractFieldsForTable(req.body, detailsInfo.columns);
+                if (Object.keys(detailsDataToUpdate).length > 0) {
+                    const { query: updateDetailsQuery, values: detailsValues } = buildUpdateQuery(detailsInfo.tableName, detailsDataToUpdate, detailsInfo.idField);
+                    await client.query(updateDetailsQuery, [...detailsValues, id]);
+                }
+            }
+        }
 
         await client.query('COMMIT');
-        
+
+        // Volvemos a pedir los datos completos para devolver la versión más actualizada
+        const updatedTerceroResponse = await getTerceroByIdForInternalUse(id, client);
+
         res.status(200).json({
             message: 'Tercero actualizado exitosamente',
-            data: finalTerceroData
+            data: updatedTerceroResponse
         });
 
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Error en updateTercero:', error);
+        // Devolvemos el error específico para facilitar el debug en el frontend
         res.status(500).json({ error: 'Error interno del servidor', details: error.message });
     } finally {
         if (client) client.release();
     }
 };
+
+// Es buena idea tener una función auxiliar para uso interno que ya tenga el cliente
+async function getTerceroByIdForInternalUse(id, client) {
+    const query = `
+        SELECT
+            t.*,
+            c.responsable, c.comision_porcentaje, c.activo, c.observaciones, c.nombre as nombre_cajero, c.importe_personalizado,
+            p.otros_documentos, p.sitioweb, p.camara_comercio, p.rut as proveedor_rut, p.certificado_bancario as proveedor_cb, p.medio_pago as proveedor_mp, p.responsable_iva, p.responsabilidad_fiscal,
+            h.cargo, h.rut as rrhh_rut, h.certificado_bancario as rrhh_cb, h.medio_pago as rrhh_mp
+        FROM public.terceros t
+        LEFT JOIN public.cajeros c ON t.id = c.id_cajero
+        LEFT JOIN public.proveedores p ON t.id = p.id
+        LEFT JOIN public.rrhh h ON t.id = h.id
+        WHERE t.id = $1;
+    `;
+    const { rows: [fullData] } = await client.query(query, [id]);
+    return fullData || null;
+}
+
+
+
 
 export const deleteTercero = async (req, res) => {
     const { id } = req.params;
