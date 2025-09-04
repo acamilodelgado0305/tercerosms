@@ -10,15 +10,16 @@ import {
     getTercerosSummary,
     getTerceros,
 } from "../controllers/tercerosController.js"; // *** Crucial: Ensure '.js' extension here ***
+import { authMiddleware } from "../middlewares/authenticateToken.js";
 
 const router = express.Router();
 
 // 1. Get all terceros
 
 // Ruta correcta
-router.get("/terceros/summary", getTercerosSummary); 
+router.get("/terceros/summary",authMiddleware, getTercerosSummary); 
 
-router.get("/terceros", getAllTerceros);
+router.get("/terceros", authMiddleware,getAllTerceros);
 router.get("/allterceros", getTerceros);
 
 
@@ -26,13 +27,13 @@ router.get("/allterceros", getTerceros);
 
 
 // 3. Create a new tercero
-router.post("/terceros", createTercero);
+router.post("/terceros", authMiddleware, createTercero);
 
 
 
 // 4. Update a tercero by ID
-router.put("/terceros/:id", updateTercero);
-router.patch("/terceros/:id", updateTercero); // Use PATCH for partial updates
+router.put("/terceros/:id", authMiddleware, updateTercero);
+router.patch("/terceros/:id",authMiddleware, updateTercero); // Use PATCH for partial updates
 
 // 5. Delete a tercero by ID
 router.delete("/terceros/:id", deleteTercero);

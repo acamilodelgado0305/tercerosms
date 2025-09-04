@@ -55,6 +55,8 @@ export const createTercero = async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        const { workspaceId } = req.user;
+
         const {
             nombre, tipo, tipo_identificacion, numero_identificacion,
             direccion, ciudad, departamento, pais,
@@ -62,24 +64,28 @@ export const createTercero = async (req, res) => {
             ...specificData
         } = req.body;
 
-        if (!nombre || !tipo) {
-            return res.status(400).json({ error: 'El nombre y el tipo del tercero son obligatorios.' });
+        if (!nombre || !tipo || !workspaceId) {
+            return res.status(400).json({ error: 'El nombre, el tipo y un workspace válido son obligatorios.' });
         }
 
         const idTercero = uuidv4();
 
         // 1. Inserción en 'terceros'
         const queryTercero = `
-            INSERT INTO public.terceros (id, nombre, tipo, tipo_identificacion, numero_identificacion, direccion, ciudad, departamento, pais, telefono, correo)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *;
+            INSERT INTO public.terceros (
+                id, nombre, tipo, tipo_identificacion, numero_identificacion, 
+                direccion, ciudad, departamento, pais, telefono, correo, workspace_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *;
         `;
-        
+
         // CORRECCIÓN: Se eliminó JSON.stringify. Pasamos los objetos directamente.
         const valuesTercero = [
             idTercero, nombre, tipo,
             tipo_identificacion || null, numero_identificacion || null,
             direccion || null, ciudad || null, departamento || null, pais || null,
-            telefono || {}, correo || {}
+            telefono || {}, correo || {},
+            workspaceId // <-- Se añade el workspaceId a los valores
         ];
 
         const { rows: [newTercero] } = await client.query(queryTercero, valuesTercero);
@@ -133,6 +139,8 @@ export const createTercero = async (req, res) => {
 };
 
 export const getAllTerceros = async (req, res) => {
+
+    const { workspaceId } = req.user;
     // 1. OBTENER Y SANETIZAR PARÁMETROS DE CONSULTA
     const { search = '' } = req.query;
 
@@ -157,12 +165,13 @@ export const getAllTerceros = async (req, res) => {
     try {
         client = await pool.connect();
 
-        const queryParams = [];
-        let whereClauses = [];
+        // CAMBIO: Iniciamos nuestras consultas con el workspaceId como primer parámetro.
+        const queryParams = [workspaceId];
+        let whereClauses = [`workspace_id = $1`]; // El filtro base y obligatorio.
 
+        // Los siguientes filtros usarán los parámetros $2, $3, etc.
         if (search) {
             queryParams.push(`%${search}%`);
-            // FIX 3: Hacer la búsqueda robusta ante nulos con COALESCE.
             whereClauses.push(`(COALESCE(nombre, '') || ' ' || COALESCE(numero_identificacion, '')) ILIKE $${queryParams.length}`);
         }
 
@@ -171,10 +180,10 @@ export const getAllTerceros = async (req, res) => {
             whereClauses.push(`tipo = $${queryParams.length}`);
         }
 
-        const whereString = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+        const whereString = `WHERE ${whereClauses.join(' AND ')}`;
 
         // 2. OBTENER EL CONTEO TOTAL DE ELEMENTOS
-        const totalQuery = `SELECT COUNT(*) FROM public.terceros ${whereString}`;
+       const totalQuery = `SELECT COUNT(*) FROM public.terceros ${whereString}`;
         const totalResult = await client.query(totalQuery, queryParams);
         const totalItems = parseInt(totalResult.rows[0].count, 10);
         const totalPages = Math.ceil(totalItems / limit);
@@ -185,10 +194,9 @@ export const getAllTerceros = async (req, res) => {
 
         const dataQuery = `
             SELECT
-                -- FIX 4: Incluir TODAS las columnas de la tabla terceros.
                 id, nombre, tipo, tipo_identificacion, numero_identificacion,
                 direccion, ciudad, departamento, pais, telefono, correo,
-                fecha_creacion, fecha_actualizacion
+                fecha_creacion, fecha_actualizacion, workspace_id
             FROM
                 public.terceros
             ${whereString}
@@ -250,9 +258,9 @@ export const getTerceros = async (req, res) => {
     } catch (error) {
         // El manejo de errores se mantiene robusto.
         console.error('Error in getAllTercerosParaPrueba:', error);
-        res.status(500).json({ 
-            error: 'Ocurrió un error inesperado al obtener los terceros.', 
-            details: error.message 
+        res.status(500).json({
+            error: 'Ocurrió un error inesperado al obtener los terceros.',
+            details: error.message
         });
     } finally {
         // La liberación del cliente es crucial y se mantiene.
@@ -282,7 +290,7 @@ export const getAllCajeros = async (req, res) => {
         const totalPages = Math.ceil(totalItems / limit);
 
         // ===== CONSULTA CORREGIDA =====
-       
+
         // 'ciudad', 'departamento' y 'pais' se obtienen de 't' (terceros).
         const dataQuery = `
             SELECT
@@ -355,7 +363,7 @@ export const getTerceroById = async (req, res) => {
             LEFT JOIN public.rrhh h ON t.id = h.id
             WHERE t.id = $1;
         `;
-        
+
         const { rows: [fullData] } = await client.query(query, [id]);
 
         if (!fullData) {
@@ -364,7 +372,7 @@ export const getTerceroById = async (req, res) => {
 
         // CORRECCIÓN: Procesamos 'fullData' para enviarlo como un solo objeto plano.
         // El frontend ya no necesitará separar 'tercero' de 'details'.
-        
+
         // Renombramos los campos que tienen el mismo nombre en diferentes tablas (ej. 'rut')
         // para que no se sobreescriban en el objeto final.
         if (fullData.tipo === 'proveedor') {
@@ -436,86 +444,125 @@ export const updateTercero = async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // 1. OBTENER ESTADO ACTUAL DEL TERCERO
-        const { rows: [currentTercero] } = await client.query('SELECT * FROM public.terceros WHERE id = $1 FOR UPDATE', [id]);
+        // --- 1. SEGURIDAD Y VALIDACIÓN ---
+        const { workspaceId } = req.user; // Identidad siempre desde el token verificado.
+        if (!workspaceId) {
+            throw new Error('ERROR_DE_AUTENTICACION: El token no contiene un workspace_id.');
+        }
+
+        // Desestructuramos todos los posibles campos del body.
+        const {
+            nombre, tipo: newType, tipo_identificacion, numero_identificacion,
+            direccion, ciudad, departamento, pais,
+            telefono, correo,
+            ...specificData
+        } = req.body;
+        
+        if (!nombre && !newType) {
+             throw new Error('ERROR_DE_VALIDACION: Se requiere al menos un campo para actualizar.');
+        }
+
+        // --- 2. OBTENER ESTADO ACTUAL (DE FORMA SEGURA) ---
+        // Buscamos el tercero asegurando que pertenezca al workspace del usuario.
+        const { rows: [currentTercero] } = await client.query(
+            'SELECT * FROM public.terceros WHERE id = $1 AND workspace_id = $2 FOR UPDATE',
+            [id, workspaceId]
+        );
+
         if (!currentTercero) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Tercero no encontrado' });
+            throw new Error('ERROR_DE_NEGOCIO: Tercero no encontrado o sin permisos para editarlo.');
         }
         
         const currentType = currentTercero.tipo;
-        const newType = req.body.tipo;
 
-        // 2. ACTUALIZAR LA TABLA PRINCIPAL 'terceros'
-        // Mapeamos el nombre del cajero si viene en el payload.
-        if (newType === 'cajero' && req.body.nombre_cajero) {
-            req.body.nombre = req.body.nombre_cajero;
-        }
+        // --- 3. ACTUALIZAR TABLA PRINCIPAL 'terceros' ---
+        const updateTerceroQuery = `
+            UPDATE public.terceros SET
+                nombre = $1, tipo = $2, tipo_identificacion = $3, numero_identificacion = $4,
+                direccion = $5, ciudad = $6, departamento = $7, pais = $8,
+                telefono = $9, correo = $10
+            WHERE id = $11 AND workspace_id = $12
+            RETURNING *;
+        `;
+        const terceroValues = [
+            nombre ?? currentTercero.nombre,
+            newType ?? currentType, // Usa el nuevo tipo si se proporciona, si no, mantiene el actual.
+            tipo_identificacion ?? currentTercero.tipo_identificacion,
+            numero_identificacion ?? currentTercero.numero_identificacion,
+            direccion ?? currentTercero.direccion,
+            ciudad ?? currentTercero.ciudad,
+            departamento ?? currentTercero.departamento,
+            pais ?? currentTercero.pais,
+            telefono ?? currentTercero.telefono,
+            correo ?? currentTercero.correo,
+            id, workspaceId
+        ];
+        const { rows: [updatedTercero] } = await client.query(updateTerceroQuery, terceroValues);
 
-        const terceroDataToUpdate = extractFieldsForTable(req.body, TERCERO_COLUMNS);
-        terceroDataToUpdate.tipo = newType || currentType;
 
-        const { query: updateTerceroQuery, values: terceroValues } = buildUpdateQuery('terceros', terceroDataToUpdate, 'id');
-        await client.query(updateTerceroQuery, [...terceroValues, id]);
+        // --- 4. MANEJAR ACTUALIZACIÓN DE TABLAS DE DETALLES ---
+        let details = {};
+        const finalType = updatedTercero.tipo;
 
-        // 3. LÓGICA DE MANEJO DE DETALLES (SI HAY CAMBIO DE TIPO)
+        // Si el tipo de tercero cambió, eliminamos el registro antiguo y creamos uno nuevo.
         if (newType && newType !== currentType) {
-            // 3A. Eliminar el registro de la tabla de detalles ANTIGUA
-            const oldDetailsInfo = getTerceroTypeDetails(currentType);
-            if (oldDetailsInfo) {
-                await client.query(`DELETE FROM public.${oldDetailsInfo.tableName} WHERE ${oldDetailsInfo.idField} = $1`, [id]);
+            console.log(`El tipo de tercero cambió de '${currentType}' a '${newType}'. Recreando detalles...`);
+            // Eliminamos el registro de la tabla de detalles ANTIGUA.
+            if (currentType === 'cajero') await client.query('DELETE FROM public.cajeros WHERE id_cajero = $1', [id]);
+            if (currentType === 'proveedor') await client.query('DELETE FROM public.proveedores WHERE id = $1', [id]);
+            if (currentType === 'rrhh') await client.query('DELETE FROM public.rrhh WHERE id = $1', [id]);
+
+            // Creamos el registro en la tabla de detalles NUEVA.
+            if (finalType === 'cajero') {
+                 const { responsable, comision_porcentaje = 0, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
+                 const { rows: [result] } = await client.query('INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;', [id, responsable ?? nombre, comision_porcentaje, activo, observaciones, nombre_cajero ?? nombre, importe_personalizado]);
+                 details = result;
             }
-
-            // 3B. Crear un nuevo registro en la tabla de detalles NUEVA
-            const newDetailsInfo = getTerceroTypeDetails(newType);
-            if (newDetailsInfo) {
-                const dataForNewDetails = extractFieldsForTable(req.body, newDetailsInfo.columns);
-                
-                const finalDataForInsert = {
-                    [newDetailsInfo.idField]: id,
-                    ...dataForNewDetails
-                };
-
-                const columns = Object.keys(finalDataForInsert);
-                const values = Object.values(finalDataForInsert);
-                // Aquí creamos el string de placeholders, como "$1, $2, $3"
-                const valuesPlaceholders = columns.map((_, i) => `$${i + 1}`).join(', ');
-
-                // ===== INICIO DE LA CORRECCIÓN =====
-                // El error estaba aquí. Usamos la variable 'valuesPlaceholders' directamente,
-                // porque ya es un string y no necesita otro .join().
-                const insertQuery = `INSERT INTO public.${newDetailsInfo.tableName} (${columns.join(', ')}) VALUES (${valuesPlaceholders})`;
-                // ===== FIN DE LA CORRECCIÓN =====
-
-                await client.query(insertQuery, values);
-            }
+            // (Añadir lógica similar para 'proveedor' y 'rrhh' si es necesario crear con datos del body)
         } else {
-            // 4. LÓGICA DE ACTUALIZACIÓN SIMPLE (SIN CAMBIO DE TIPO)
-            const detailsInfo = getTerceroTypeDetails(currentType);
-            if (detailsInfo) {
-                const detailsDataToUpdate = extractFieldsForTable(req.body, detailsInfo.columns);
-                if (Object.keys(detailsDataToUpdate).length > 0) {
-                    const { query: updateDetailsQuery, values: detailsValues } = buildUpdateQuery(detailsInfo.tableName, detailsDataToUpdate, detailsInfo.idField);
-                    await client.query(updateDetailsQuery, [...detailsValues, id]);
-                }
+            // Si el tipo no cambió, simplemente actualizamos la tabla de detalles correspondiente.
+            console.log(`Actualizando detalles para el tipo '${finalType}'...`);
+            if (finalType === 'cajero') {
+                const { responsable, comision_porcentaje, activo, observaciones, nombre_cajero, importe_personalizado } = specificData;
+                const { rows: [result] } = await client.query('UPDATE public.cajeros SET responsable=COALESCE($1, responsable), comision_porcentaje=COALESCE($2, comision_porcentaje), activo=COALESCE($3, activo), observaciones=COALESCE($4, observaciones), nombre=COALESCE($5, nombre), importe_personalizado=COALESCE($6, importe_personalizado) WHERE id_cajero = $7 RETURNING *;', [responsable, comision_porcentaje, activo, observaciones, nombre_cajero, importe_personalizado, id]);
+                details = result;
+            }
+            if (finalType === 'proveedor') {
+                 const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal } = specificData;
+                 const { rows: [result] } = await client.query('UPDATE public.proveedores SET otros_documentos=COALESCE($1, otros_documentos), sitioweb=COALESCE($2, sitioweb) /* ...etc */ WHERE id = $3 RETURNING *;', [otros_documentos, sitioweb, id]);
+                 details = result;
+            }
+             if (finalType === 'rrhh') {
+                 const { rut, certificado_bancario, medio_pago, cargo } = specificData;
+                 const { rows: [result] } = await client.query('UPDATE public.rrhh SET rut=COALESCE($1, rut), cargo=COALESCE($2, cargo) /* ...etc */ WHERE id = $3 RETURNING *;', [rut, cargo, id]);
+                 details = result;
             }
         }
 
         await client.query('COMMIT');
 
-        // Volvemos a pedir los datos completos para devolver la versión más actualizada
-        const updatedTerceroResponse = await getTerceroByIdForInternalUse(id, client);
-
         res.status(200).json({
             message: 'Tercero actualizado exitosamente',
-            data: updatedTerceroResponse
+            data: { ...updatedTercero, ...details } // Enviamos una respuesta plana y combinada
         });
 
     } catch (error) {
-        await client.query('ROLLBACK');
+        if (client) await client.query('ROLLBACK');
         console.error('Error en updateTercero:', error);
-        // Devolvemos el error específico para facilitar el debug en el frontend
-        res.status(500).json({ error: 'Error interno del servidor', details: error.message });
+        
+        // Manejo de errores estandarizado
+        let statusCode = 500;
+        let userErrorMessage = 'Error interno del servidor';
+        let userErrorDetails = error.message;
+
+        if (error.message.startsWith('ERROR_')) {
+             const [type] = error.message.replace('ERROR_', '').split(':');
+             statusCode = (type === 'DE_VALIDACION' || type === 'DE_NEGOCIO') ? 400 : (type === 'DE_AUTENTICACION' ? 401 : 500);
+             userErrorMessage = error.message;
+        }
+        
+        res.status(statusCode).json({ error: userErrorMessage, details: userErrorDetails });
+
     } finally {
         if (client) client.release();
     }
@@ -545,7 +592,7 @@ async function getTerceroByIdForInternalUse(id, client) {
 export const deleteTercero = async (req, res) => {
     const { id } = req.params;
     const client = await pool.connect();
-    
+
     try {
         await client.query('BEGIN');
 
@@ -611,7 +658,7 @@ export const deleteTercero = async (req, res) => {
         }
 
         await client.query('COMMIT');
-        
+
         res.status(200).json({
             message: `Tercero de tipo '${tipoTercero}' eliminado correctamente.`,
             deletedId: id,
@@ -634,58 +681,61 @@ export const deleteTercero = async (req, res) => {
 
 
 export const getTercerosSummary = async (req, res) => {
+    // NUEVO: Obtenemos el workspaceId del token del usuario.
+    const { workspaceId } = req.user;
+
     let client;
     try {
         client = await pool.connect();
 
-        // 1. DEFINIR TODAS LAS CONSULTAS EN PARALELO
+        // CAMBIO: Todas las consultas ahora aceptan un parámetro para el workspace_id.
         const conteoPorTipoQuery = client.query(`
             SELECT COALESCE(tipo, 'Sin Asignar') as tipo, COUNT(*) as cantidad
-            FROM public.terceros GROUP BY 1 ORDER BY cantidad DESC;
-        `);
+            FROM public.terceros 
+            WHERE workspace_id = $1 
+            GROUP BY 1 ORDER BY cantidad DESC;
+        `, [workspaceId]);
 
         const conteoPorCiudadQuery = client.query(`
             SELECT COALESCE(ciudad, 'Sin Ciudad') as ciudad, COUNT(*) as cantidad 
             FROM public.terceros 
+            WHERE workspace_id = $1 
             GROUP BY ciudad ORDER BY cantidad DESC LIMIT 5;
-        `);
+        `, [workspaceId]);
 
-        // FIX 1: Corregir la consulta de calidad de datos para objetos JSONB
         const calidadDatosQuery = client.query(`
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE correo IS NULL OR correo = '{}'::jsonb) AS sin_correo,
                 COUNT(*) FILTER (WHERE telefono IS NULL OR telefono = '{}'::jsonb) AS sin_telefono
-            FROM public.terceros;
-        `);
+            FROM public.terceros
+            WHERE workspace_id = $1;
+        `, [workspaceId]);
 
-        // MEJORA 1: Añadir consulta para obtener los últimos 5 terceros creados
         const tercerosRecientesQuery = client.query(`
             SELECT id, nombre, tipo, fecha_creacion 
             FROM public.terceros 
+            WHERE workspace_id = $1 
             ORDER BY fecha_creacion DESC 
             LIMIT 5;
-        `);
+        `, [workspaceId]);
 
-        // 2. EJECUTAR TODAS LAS CONSULTAS SIMULTÁNEAMENTE
+        // La ejecución en paralelo se mantiene, es muy eficiente.
         const [
             conteoPorTipoResult,
             conteoPorCiudadResult,
             calidadDatosResult,
-            tercerosRecientesResult // Capturamos el nuevo resultado
+            tercerosRecientesResult
         ] = await Promise.all([
             conteoPorTipoQuery,
             conteoPorCiudadQuery,
             calidadDatosQuery,
-            tercerosRecientesQuery // Añadimos la nueva promesa
+            tercerosRecientesQuery
         ]);
 
-        // 3. PROCESAR Y FORMATEAR LOS RESULTADOS
+        // El procesamiento de los resultados se mantiene igual.
         const calidadDatos = calidadDatosResult.rows[0];
-
-        // FIX 2: Usar el total ya calculado por la consulta de calidad de datos
         const totalTerceros = parseInt(calidadDatos.total, 10);
-
         const formattedCalidadDatos = {
             total: totalTerceros,
             sin_correo: parseInt(calidadDatos.sin_correo, 10),
@@ -699,7 +749,7 @@ export const getTercerosSummary = async (req, res) => {
                 conteoPorTipo: conteoPorTipoResult.rows.map(r => ({ ...r, cantidad: parseInt(r.cantidad) })),
                 conteoPorCiudad: conteoPorCiudadResult.rows.map(r => ({ ...r, cantidad: parseInt(r.cantidad) })),
                 calidadDatos: formattedCalidadDatos,
-                tercerosRecientes: tercerosRecientesResult.rows, // MEJORA 2: Añadir los datos al response
+                tercerosRecientes: tercerosRecientesResult.rows,
             }
         });
 

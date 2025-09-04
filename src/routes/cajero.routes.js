@@ -6,11 +6,12 @@ import {
   updateCajero,
   deleteCajero,
 } from "../controllers/cajero.controller.js";
+import { authMiddleware } from "../middlewares/authenticateToken.js";
 
 const router = express.Router();
 
 // 1. Obtener todos los cajeros
-router.get("/cajeros", getAllCajeros);
+router.get("/cajeros",authMiddleware, getAllCajeros);
 
 // 2. Crear un nuevo cajero
 router.post("/cajeros", createCajero);

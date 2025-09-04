@@ -2,17 +2,15 @@ import { v4 as uuidv4 } from 'uuid';
 import pool from '../database.js';
 
 
-
-
-
 export const getProveedoresYRRHH = async (req, res) => {
+    // NUEVO: Obtenemos el workspaceId desde el token del usuario.
+    const { workspaceId } = req.user;
+
     let client;
     try {
         client = await pool.connect();
 
-        // 1. CONSULTA ÚNICA Y OPTIMIZADA
-        // Se eliminan los LEFT JOINs porque todos los campos requeridos están en la tabla 'terceros'.
-        // Se eliminan LIMIT y OFFSET para quitar la paginación.
+        // CAMBIO: Se añade el filtro por workspace_id a la cláusula WHERE.
         const dataQuery = `
             SELECT
                 id,
@@ -21,14 +19,15 @@ export const getProveedoresYRRHH = async (req, res) => {
                 tipo_identificacion,
                 numero_identificacion
             FROM public.terceros
-            WHERE tipo IN ('proveedor', 'rrhh')
+            WHERE 
+                workspace_id = $1 AND tipo IN ('proveedor', 'rrhh')
             ORDER BY nombre ASC;
         `;
 
-        const dataResult = await client.query(dataQuery);
+        // Se pasa el workspaceId como parámetro a la consulta.
+        const dataResult = await client.query(dataQuery, [workspaceId]);
         
-        // 2. FORMATEO SIMPLE DE LA RESPUESTA
-        // Ya no es necesario el mapeo complejo. La data de la BD tiene la forma que necesitamos.
+        // La lógica de formateo se mantiene, es correcta.
         const datosFormateados = dataResult.rows.map(row => ({
             id: row.id,
             nombre: row.nombre,
@@ -39,15 +38,14 @@ export const getProveedoresYRRHH = async (req, res) => {
             }
         }));
 
-        // 3. ENVIAR RESPUESTA FINAL SIN PAGINACIÓN
         res.status(200).json({
             message: 'Lista simplificada de Proveedores y RRHH obtenida exitosamente.',
-            totalItems: dataResult.rowCount, // Es útil saber cuántos registros se trajeron.
+            totalItems: dataResult.rowCount,
             data: datosFormateados,
         });
 
     } catch (error) {
-        console.error('Error en getProveedoresYRRHH_Simplificado:', error);
+        console.error('Error en getProveedoresYRRHH:', error); // Nombre de función corregido en el log
         res.status(500).json({
             error: 'Ocurrió un error inesperado al obtener la lista simplificada de terceros.',
             details: error.message

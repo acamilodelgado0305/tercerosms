@@ -101,6 +101,9 @@ export const createCajero = async (req, res) => {
 
 // 2. OBTENER TODOS LOS CAJEROS
 export const getAllCajeros = async (req, res) => {
+    // NUEVO: Obtenemos el workspaceId desde el token del usuario
+    const { workspaceId } = req.user;
+
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 25;
     const offset = (page - 1) * limit;
@@ -109,47 +112,37 @@ export const getAllCajeros = async (req, res) => {
     try {
         client = await pool.connect();
 
+        // CAMBIO: Añadimos el filtro por workspace_id a la consulta de conteo
         const totalQuery = `
             SELECT COUNT(*)
             FROM public.terceros t
             INNER JOIN public.cajeros c ON t.id = c.id_cajero
-            WHERE t.tipo = 'cajero';
+            WHERE t.tipo = 'cajero' AND t.workspace_id = $1;
         `;
-        const totalResult = await client.query(totalQuery);
+        const totalResult = await client.query(totalQuery, [workspaceId]); // Pasamos el workspaceId
         const totalItems = parseInt(totalResult.rows[0].count, 10);
         const totalPages = Math.ceil(totalItems / limit);
 
-        // ===== CONSULTA CORREGIDA =====
-       
-        // 'ciudad', 'departamento' y 'pais' se obtienen de 't' (terceros).
+        // CAMBIO: Añadimos el filtro por workspace_id a la consulta de datos
         const dataQuery = `
             SELECT
-                t.id,
-                t.nombre,
-                t.direccion,
-                t.ciudad,
-                t.departamento,
-                t.pais,
-                t.telefono,
-                t.correo,
-                c.responsable AS responsable_cajero,
-                c.comision_porcentaje,
-                c.activo,
-                c.observaciones,
-                c.importe_personalizado,
+                t.id, t.nombre, t.direccion, t.ciudad, t.departamento,
+                t.pais, t.telefono, t.correo,
+                c.responsable AS responsable_cajero, c.comision_porcentaje,
+                c.activo, c.observaciones, c.importe_personalizado,
                 c.nombre AS nombre_asignado_cajero
             FROM
                 public.terceros t
             INNER JOIN
                 public.cajeros c ON t.id = c.id_cajero
             WHERE
-                t.tipo = 'cajero'
+                t.tipo = 'cajero' AND t.workspace_id = $3 -- El tercer parámetro es workspace_id
             ORDER BY
                 t.nombre ASC
             LIMIT $1 OFFSET $2;
         `;
 
-        const dataResult = await client.query(dataQuery, [limit, offset]);
+        const dataResult = await client.query(dataQuery, [limit, offset, workspaceId]); // Pasamos los 3 parámetros
 
         res.status(200).json({
             message: 'Cajeros obtenidos exitosamente.',
