@@ -61,6 +61,9 @@ export const createTercero = async (req, res) => {
             nombre, tipo, tipo_identificacion, numero_identificacion,
             direccion, ciudad, departamento, pais,
             telefono, correo,
+            // --- NUEVO ---
+            // Capturamos las cuentas. Por defecto es un array vacío.
+            cuentas_bancarias = [], 
             ...specificData
         } = req.body;
 
@@ -78,55 +81,88 @@ export const createTercero = async (req, res) => {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *;
         `;
-
-        // CORRECCIÓN: Se eliminó JSON.stringify. Pasamos los objetos directamente.
+        
         const valuesTercero = [
             idTercero, nombre, tipo,
             tipo_identificacion || null, numero_identificacion || null,
             direccion || null, ciudad || null, departamento || null, pais || null,
             telefono || {}, correo || {},
-            workspaceId // <-- Se añade el workspaceId a los valores
+            workspaceId
         ];
 
         const { rows: [newTercero] } = await client.query(queryTercero, valuesTercero);
 
-        // 2. Inserción en tablas de detalles
+        // 2. Inserción en tablas de detalles (Tu lógica existente)
         let details = {};
         if (tipo === 'cajero') {
-            const { responsable, comision_porcentaje, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
-            const queryCajero = `
-                INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado)
-                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
-            `;
-            const valuesCajero = [idTercero, responsable || nombre, comision_porcentaje || 0, activo, observaciones, nombre_cajero || nombre, importe_personalizado];
-            const { rows: [result] } = await client.query(queryCajero, valuesCajero);
-            details = result;
+            // ... tu lógica de 'cajero' ...
+            const { responsable, comision_porcentaje, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
+            const queryCajero = `
+                INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado)
+                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
+            `;
+            const valuesCajero = [idTercero, responsable || nombre, comision_porcentaje || 0, activo, observaciones, nombre_cajero || nombre, importe_personalizado];
+            const { rows: [result] } = await client.query(queryCajero, valuesCajero);
+            details = result;
         } else if (tipo === 'proveedor') {
-            const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal } = specificData;
-            const queryProveedor = `
-                INSERT INTO public.proveedores (id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *;
-            `;
-            // CORRECCIÓN: Se eliminó JSON.stringify.
-            const valuesProveedor = [idTercero, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal || []];
-            const { rows: [result] } = await client.query(queryProveedor, valuesProveedor);
-            details = result;
+            // ... tu lógica de 'proveedor' ...
+            const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal } = specificData;
+            const queryProveedor = `
+                INSERT INTO public.proveedores (id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *;
+            `;
+            const valuesProveedor = [idTercero, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal || []];
+            const { rows: [result] } = await client.query(queryProveedor, valuesProveedor);
+            details = result;
         } else if (tipo === 'rrhh') {
-            const { rut, certificado_bancario, medio_pago, cargo } = specificData;
-            const queryRrhh = `
-                INSERT INTO public.rrhh (id, rut, certificado_bancario, medio_pago, cargo)
-                VALUES ($1, $2, $3, $4, $5) RETURNING *;
+            // ... tu lógica de 'rrhh' ...
+            const { rut, certificado_bancario, medio_pago, cargo } = specificData;
+            const queryRrhh = `
+                INSERT INTO public.rrhh (id, rut, certificado_bancario, medio_pago, cargo)
+                VALUES ($1, $2, $3, $4, $5) RETURNING *;
+            `;
+            const valuesRrhh = [idTercero, rut, certificado_bancario, medio_pago, cargo];
+            const { rows: [result] } = await client.query(queryRrhh, valuesRrhh);
+            details = result;
+        }
+
+        // --- 3. NUEVO: Inserción en 'cuentas_bancarias_terceros' ---
+        let createdCuentas = [];
+        if (cuentas_bancarias && cuentas_bancarias.length > 0) {
+            console.log(`Insertando ${cuentas_bancarias.length} cuentas bancarias...`);
+            
+            const queryCuentas = `
+                INSERT INTO public.cuentas_bancarias_terceros
+                  (tercero_id, nombre_banco, numero_cuenta, tipo_cuenta, es_preferida)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING *;
             `;
-            const valuesRrhh = [idTercero, rut, certificado_bancario, medio_pago, cargo];
-            const { rows: [result] } = await client.query(queryRrhh, valuesRrhh);
-            details = result;
+
+            for (const cuenta of cuentas_bancarias) {
+                // Validación básica
+                if (!cuenta.nombre_banco || !cuenta.numero_cuenta) {
+                    throw new Error('Cada cuenta bancaria debe tener al menos nombre_banco y numero_cuenta.');
+                }
+                
+                const valuesCuenta = [
+                    idTercero,
+                    cuenta.nombre_banco,
+                    cuenta.numero_cuenta,
+                    cuenta.tipo_cuenta || null,
+                    cuenta.es_preferida || false
+                ];
+                
+                const { rows: [newCuenta] } = await client.query(queryCuentas, valuesCuenta);
+                createdCuentas.push(newCuenta);
+            }
         }
 
         await client.query('COMMIT');
 
         res.status(201).json({
             message: `Tercero de tipo '${tipo}' creado exitosamente.`,
-            data: { ...newTercero, ...details } // Enviamos una respuesta plana y combinada
+            // Combinamos el tercero, sus detalles y sus nuevas cuentas en la respuesta
+            data: { ...newTercero, ...details, cuentas: createdCuentas } 
         });
 
     } catch (error) {
@@ -350,7 +386,7 @@ export const getTerceroById = async (req, res) => {
     const client = await pool.connect();
 
     try {
-        // Tu consulta es eficiente, la mantenemos. Trae todos los datos de una vez.
+        // --- 1. PRIMERA CONSULTA: Obtener los datos 1 a 1 (Tu query actual) ---
         const query = `
             SELECT
                 t.*,
@@ -370,11 +406,20 @@ export const getTerceroById = async (req, res) => {
             return res.status(404).json({ error: 'Tercero no encontrado' });
         }
 
-        // CORRECCIÓN: Procesamos 'fullData' para enviarlo como un solo objeto plano.
-        // El frontend ya no necesitará separar 'tercero' de 'details'.
+        // --- 2. NUEVO: SEGUNDA CONSULTA: Obtener los datos 1 a N (Cuentas) ---
+        const queryCuentas = `
+            SELECT * FROM public.cuentas_bancarias_terceros
+            WHERE tercero_id = $1
+            ORDER BY es_preferida DESC, fecha_creacion ASC;
+        `;
+        // (Ordenamos para que el frontend muestre la 'preferida' de primero)
+        
+        const { rows: cuentasBancarias } = await client.query(queryCuentas, [id]);
 
-        // Renombramos los campos que tienen el mismo nombre en diferentes tablas (ej. 'rut')
-        // para que no se sobreescriban en el objeto final.
+
+        // --- 3. PROCESAR Y COMBINAR ---
+        
+        // (Tu lógica de renombrar campos es correcta, la mantenemos)
         if (fullData.tipo === 'proveedor') {
             fullData.rut = fullData.proveedor_rut;
             fullData.certificado_bancario = fullData.proveedor_cb;
@@ -385,9 +430,14 @@ export const getTerceroById = async (req, res) => {
             fullData.medio_pago = fullData.rrhh_mp;
         }
 
+        // --- NUEVO: Añadimos el array de cuentas al objeto principal ---
+        fullData.cuentas = cuentasBancarias || []; // Aseguramos que siempre sea un array
+
+
         res.status(200).json({
             message: 'Tercero obtenido exitosamente',
-            data: fullData, // Enviamos el objeto plano directamente.
+            // El objeto 'data' ahora contiene toda la info + el array 'cuentas'
+            data: fullData, 
         });
 
     } catch (error) {
@@ -437,6 +487,7 @@ const buildUpdateQuery = (table, fields, idField = 'id') => {
 
 
 
+
 export const updateTercero = async (req, res) => {
     const { id } = req.params;
     const client = await pool.connect();
@@ -445,25 +496,20 @@ export const updateTercero = async (req, res) => {
         await client.query('BEGIN');
 
         // --- 1. SEGURIDAD Y VALIDACIÓN ---
-        const { workspaceId } = req.user; // Identidad siempre desde el token verificado.
+        const { workspaceId } = req.user;
         if (!workspaceId) {
             throw new Error('ERROR_DE_AUTENTICACION: El token no contiene un workspace_id.');
         }
 
-        // Desestructuramos todos los posibles campos del body.
         const {
             nombre, tipo: newType, tipo_identificacion, numero_identificacion,
             direccion, ciudad, departamento, pais,
             telefono, correo,
+            cuentas_bancarias, // Capturamos las cuentas
             ...specificData
         } = req.body;
-        
-        if (!nombre && !newType) {
-             throw new Error('ERROR_DE_VALIDACION: Se requiere al menos un campo para actualizar.');
-        }
 
         // --- 2. OBTENER ESTADO ACTUAL (DE FORMA SEGURA) ---
-        // Buscamos el tercero asegurando que pertenezca al workspace del usuario.
         const { rows: [currentTercero] } = await client.query(
             'SELECT * FROM public.terceros WHERE id = $1 AND workspace_id = $2 FOR UPDATE',
             [id, workspaceId]
@@ -486,7 +532,7 @@ export const updateTercero = async (req, res) => {
         `;
         const terceroValues = [
             nombre ?? currentTercero.nombre,
-            newType ?? currentType, // Usa el nuevo tipo si se proporciona, si no, mantiene el actual.
+            newType ?? currentType, 
             tipo_identificacion ?? currentTercero.tipo_identificacion,
             numero_identificacion ?? currentTercero.numero_identificacion,
             direccion ?? currentTercero.direccion,
@@ -499,66 +545,175 @@ export const updateTercero = async (req, res) => {
         ];
         const { rows: [updatedTercero] } = await client.query(updateTerceroQuery, terceroValues);
 
+        // --- 4. SINCRONIZAR 'cuentas_bancarias_terceros' ---
+        if (cuentas_bancarias) {
+            console.log(`Sincronizando cuentas bancarias para el tercero ${id}...`);
+            
+            const queryUpdateCuenta = `
+                UPDATE public.cuentas_bancarias_terceros
+                SET nombre_banco = $1, numero_cuenta = $2, tipo_cuenta = $3, es_preferida = $4, fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id = $5 AND tercero_id = $6;
+            `;
+            const queryInsertCuenta = `
+                INSERT INTO public.cuentas_bancarias_terceros
+                  (nombre_banco, numero_cuenta, tipo_cuenta, es_preferida, tercero_id)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id;
+            `;
 
-        // --- 4. MANEJAR ACTUALIZACIÓN DE TABLAS DE DETALLES ---
+            const { rows: currentCuentas } = await client.query('SELECT id FROM public.cuentas_bancarias_terceros WHERE tercero_id = $1', [id]);
+            const dbAccountIds = new Set(currentCuentas.map(c => c.id));
+            const requestAccountIds = new Set();
+
+            for (const cuenta of cuentas_bancarias) {
+                if (!cuenta.nombre_banco || !cuenta.numero_cuenta) {
+                    throw new Error('Cada cuenta bancaria debe tener al menos nombre_banco y numero_cuenta.');
+                }
+                
+                if (cuenta.id && dbAccountIds.has(cuenta.id)) {
+                    // UPDATE
+                    requestAccountIds.add(cuenta.id);
+                    const values = [
+                        cuenta.nombre_banco,
+                        cuenta.numero_cuenta,
+                        cuenta.tipo_cuenta || null,
+                        cuenta.es_preferida || false,
+                        cuenta.id,
+                        id
+                    ];
+                    await client.query(queryUpdateCuenta, values);
+                } else {
+                    // INSERT
+                    const values = [
+                        cuenta.nombre_banco,
+                        cuenta.numero_cuenta,
+                        cuenta.tipo_cuenta || null,
+                        cuenta.es_preferida || false,
+                        id
+                    ];
+                    const { rows: [inserted] } = await client.query(queryInsertCuenta, values);
+                    requestAccountIds.add(inserted.id);
+                }
+            }
+
+            // DELETE
+            const idsToDelete = [...dbAccountIds].filter(dbId => !requestAccountIds.has(dbId));
+            
+            if (idsToDelete.length > 0) {
+                console.log(`Eliminando ${idsToDelete.length} cuentas obsoletas...`);
+                await client.query(
+                    'DELETE FROM public.cuentas_bancarias_terceros WHERE id = ANY($1::uuid[])', 
+                    [idsToDelete]
+                );
+            }
+        }
+
+        // --- 5. MANEJAR ACTUALIZACIÓN DE TABLAS DE DETALLES ---
         let details = {};
         const finalType = updatedTercero.tipo;
 
-        // Si el tipo de tercero cambió, eliminamos el registro antiguo y creamos uno nuevo.
         if (newType && newType !== currentType) {
+            // Lógica para cambio de tipo (Eliminar antiguo, crear nuevo)
             console.log(`El tipo de tercero cambió de '${currentType}' a '${newType}'. Recreando detalles...`);
-            // Eliminamos el registro de la tabla de detalles ANTIGUA.
             if (currentType === 'cajero') await client.query('DELETE FROM public.cajeros WHERE id_cajero = $1', [id]);
             if (currentType === 'proveedor') await client.query('DELETE FROM public.proveedores WHERE id = $1', [id]);
             if (currentType === 'rrhh') await client.query('DELETE FROM public.rrhh WHERE id = $1', [id]);
 
-            // Creamos el registro en la tabla de detalles NUEVA.
+            // Crear nuevo (aquí puedes añadir la lógica de inserción para proveedor y rrhh si lo deseas)
             if (finalType === 'cajero') {
-                 const { responsable, comision_porcentaje = 0, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
-                 const { rows: [result] } = await client.query('INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;', [id, responsable ?? nombre, comision_porcentaje, activo, observaciones, nombre_cajero ?? nombre, importe_personalizado]);
-                 details = result;
+                const { responsable, comision_porcentaje = 0, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
+                const { rows: [result] } = await client.query('INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;', [id, responsable ?? nombre, comision_porcentaje, activo, observaciones, nombre_cajero ?? nombre, importe_personalizado]);
+                details = result;
             }
-            // (Añadir lógica similar para 'proveedor' y 'rrhh' si es necesario crear con datos del body)
+            // ... (Añadir lógica INSERT para proveedor y rrhh si es necesario)
+
         } else {
-            // Si el tipo no cambió, simplemente actualizamos la tabla de detalles correspondiente.
+            // Lógica para actualización (El tipo NO cambió)
             console.log(`Actualizando detalles para el tipo '${finalType}'...`);
+            
             if (finalType === 'cajero') {
                 const { responsable, comision_porcentaje, activo, observaciones, nombre_cajero, importe_personalizado } = specificData;
                 const { rows: [result] } = await client.query('UPDATE public.cajeros SET responsable=COALESCE($1, responsable), comision_porcentaje=COALESCE($2, comision_porcentaje), activo=COALESCE($3, activo), observaciones=COALESCE($4, observaciones), nombre=COALESCE($5, nombre), importe_personalizado=COALESCE($6, importe_personalizado) WHERE id_cajero = $7 RETURNING *;', [responsable, comision_porcentaje, activo, observaciones, nombre_cajero, importe_personalizado, id]);
                 details = result;
             }
+            
+            // --- 👇 AQUÍ ESTÁ LA CORRECCIÓN ---
             if (finalType === 'proveedor') {
-                 const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal } = specificData;
-                 const { rows: [result] } = await client.query('UPDATE public.proveedores SET otros_documentos=COALESCE($1, otros_documentos), sitioweb=COALESCE($2, sitioweb) /* ...etc */ WHERE id = $3 RETURNING *;', [otros_documentos, sitioweb, id]);
-                 details = result;
+                const { 
+                    otros_documentos, sitioweb, camara_comercio, rut, 
+                    certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal 
+                } = specificData;
+                
+                const query = `
+                    UPDATE public.proveedores 
+                    SET 
+                        otros_documentos = COALESCE($1, otros_documentos), 
+                        sitioweb = COALESCE($2, sitioweb), 
+                        camara_comercio = COALESCE($3, camara_comercio), 
+                        rut = COALESCE($4, rut), 
+                        certificado_bancario = COALESCE($5, certificado_bancario), 
+                        medio_pago = COALESCE($6, medio_pago), 
+                        responsable_iva = COALESCE($7, responsable_iva), 
+                        responsabilidad_fiscal = COALESCE($8, responsabilidad_fiscal)
+                    WHERE id = $9 
+                    RETURNING *;
+                `;
+                const values = [
+                    otros_documentos, sitioweb, camara_comercio, rut, 
+                    certificado_bancario, medio_pago, responsable_iva, 
+                    responsabilidad_fiscal, id
+                ];
+                
+                const { rows: [result] } = await client.query(query, values);
+                details = result;
             }
-             if (finalType === 'rrhh') {
-                 const { rut, certificado_bancario, medio_pago, cargo } = specificData;
-                 const { rows: [result] } = await client.query('UPDATE public.rrhh SET rut=COALESCE($1, rut), cargo=COALESCE($2, cargo) /* ...etc */ WHERE id = $3 RETURNING *;', [rut, cargo, id]);
-                 details = result;
+            
+            // --- 👇 Y AQUÍ TAMBIÉN ---
+            if (finalType === 'rrhh') {
+                const { rut, certificado_bancario, medio_pago, cargo } = specificData;
+                
+                const query = `
+                    UPDATE public.rrhh 
+                    SET 
+                        rut = COALESCE($1, rut), 
+                        certificado_bancario = COALESCE($2, certificado_bancario), 
+                        medio_pago = COALESCE($3, medio_pago), 
+                        cargo = COALESCE($4, cargo)
+                    WHERE id = $5 
+                    RETURNING *;
+                `;
+                const values = [rut, certificado_bancario, medio_pago, cargo, id];
+
+                const { rows: [result] } = await client.query(query, values);
+                details = result;
             }
         }
+        
+        // --- 6. OBTENER ESTADO FINAL ---
+        const { rows: finalCuentas } = await client.query(
+            'SELECT * FROM public.cuentas_bancarias_terceros WHERE tercero_id = $1 ORDER BY fecha_creacion ASC', 
+            [id]
+        );
 
         await client.query('COMMIT');
 
         res.status(200).json({
             message: 'Tercero actualizado exitosamente',
-            data: { ...updatedTercero, ...details } // Enviamos una respuesta plana y combinada
+            data: { ...updatedTercero, ...details, cuentas: finalCuentas }
         });
 
     } catch (error) {
         if (client) await client.query('ROLLBACK');
         console.error('Error en updateTercero:', error);
         
-        // Manejo de errores estandarizado
         let statusCode = 500;
         let userErrorMessage = 'Error interno del servidor';
         let userErrorDetails = error.message;
 
         if (error.message.startsWith('ERROR_')) {
-             const [type] = error.message.replace('ERROR_', '').split(':');
-             statusCode = (type === 'DE_VALIDACION' || type === 'DE_NEGOCIO') ? 400 : (type === 'DE_AUTENTICACION' ? 401 : 500);
-             userErrorMessage = error.message;
+            const [type] = error.message.replace('ERROR_', '').split(':');
+            statusCode = (type === 'DE_VALIDACION' || type === 'DE_NEGOCIO') ? 400 : (type === 'DE_AUTENTICACION' ? 401 : 500);
+            userErrorMessage = error.message;
         }
         
         res.status(statusCode).json({ error: userErrorMessage, details: userErrorDetails });
