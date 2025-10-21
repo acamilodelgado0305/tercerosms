@@ -36,7 +36,7 @@ router.put("/terceros/:id", authMiddleware, updateTercero);
 router.patch("/terceros/:id",authMiddleware, updateTercero); // Use PATCH for partial updates
 
 // 5. Delete a tercero by ID
-router.delete("/terceros/:id", deleteTercero);
+router.delete("/terceros/:id", authMiddleware ,deleteTercero);
 
 router.get("/terceros/:id", getTerceroById);
 router.get("/tercero/:id", getTerceroById);

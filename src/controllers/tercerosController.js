@@ -1,5 +1,6 @@
 import pool from '../database.js'; // Adjust this path to your actual DB connection pool.
 import { v4 as uuidv4 } from 'uuid'; // Import uuid for generating unique IDs
+import axios from 'axios'; // O tu librería HTTP preferida
 
 
 const fetchFullTerceroById = async (id, client) => {
@@ -742,34 +743,99 @@ async function getTerceroByIdForInternalUse(id, client) {
 }
 
 
-
+const FINANZAS_API_URL = process.env.FINANZAS_SERVICE_BASE_URL || 'http://localhost:3002/api'; // URL base del microservicio finanzas
 
 export const deleteTercero = async (req, res) => {
-    const { id } = req.params;
-    const client = await pool.connect();
+    const { id: terceroId } = req.params;
+
+    // 1. Validación de Autenticación y Workspace (Como antes)
+    if (!req.user || !req.user.workspaceId) {
+        console.warn(`Intento no autorizado o falta workspaceId para deleteTercero. TerceroId: ${terceroId}`);
+        return res.status(401).json({ error: 'No autorizado o falta workspaceId' });
+    }
+    const { workspaceId, /* otros datos del user si son necesarios para auth inter-servicio */ } = req.user;
+    const userAuthToken = req.headers.authorization; // Obtener el token original si es necesario
+
+    // 2. Validación de Entrada (Como antes)
+    if (!terceroId) {
+        return res.status(400).json({ error: 'Falta el parámetro ID del tercero en la URL' });
+    }
+
+    let client; // Declarar client fuera del try para usarlo en finally
 
     try {
+        // --- INICIO: LLAMADA AL MICROSERVICIO FINANZAS ---
+        console.log(`Verificando transacciones para tercero ${terceroId} en finanzas...`);
+        let hasTransactions = false; // Asumir que no hay transacciones por defecto seguro
+
+        try {
+            const checkUrl = `${FINANZAS_API_URL}/transactions/${terceroId}/has-transactions`;
+            
+            // Configura headers según necesites (ej. pasar el token del usuario)
+            const apiCallOptions = {
+                headers: {
+                    // Pasar el token original puede ser una opción, o usar un token de servicio
+                    'Authorization': userAuthToken, 
+                     // Asegúrate de que finanzas pueda validar este token y extraer workspaceId
+                    'Content-Type': 'application/json'
+                }
+            };
+
+            const response = await axios.get(checkUrl, apiCallOptions);
+
+            if (response.status === 200 && typeof response.data.hasTransactions === 'boolean') {
+                hasTransactions = response.data.hasTransactions;
+                console.log(`Respuesta de finanzas: hasTransactions = ${hasTransactions}`);
+            } else {
+                // Respuesta inesperada del servicio de finanzas
+                console.error(`Respuesta inesperada de ${checkUrl}:`, response.status, response.data);
+                throw new Error('Respuesta inválida del servicio de finanzas al verificar transacciones.');
+            }
+
+        } catch (apiError) {
+             // Manejo de errores de la llamada API
+            console.error(`Error al llamar al endpoint de finanzas ${FINANZAS_API_URL}/transactions/${terceroId}/has-transactions:`, apiError.response?.data || apiError.message);
+            // DECISIÓN IMPORTANTE: ¿Bloquear si falla la verificación? Generalmente SÍ por seguridad contable.
+            return res.status(503).json({ // 503 Service Unavailable o 500 Internal Server Error
+                error: 'Error de comunicación entre servicios.',
+                message: 'No se pudo verificar si el tercero tiene transacciones asociadas. Intente de nuevo más tarde.'
+            });
+        }
+
+        // Si tiene transacciones, detener el proceso
+        if (hasTransactions) {
+            return res.status(409).json({
+                error: 'Conflicto: No se puede eliminar el tercero.',
+                message: 'El tercero tiene transacciones (ingresos o egresos) asociadas y no puede ser eliminado para mantener la integridad de los datos.'
+            });
+        }
+        // --- FIN: LLAMADA AL MICROSERVICIO FINANZAS ---
+
+        // Si no hay transacciones, procedemos con la eliminación local
+        console.log(`Tercero ${terceroId} no tiene transacciones asociadas. Procediendo a eliminar...`);
+        client = await pool.connect(); // Conectar a la BD de 'terceros'
         await client.query('BEGIN');
 
-        // 1. Obtener el tipo de tercero. No hay cambios aquí.
-        const { rows: [tercero] } = await client.query('SELECT tipo FROM public.terceros WHERE id = $1', [id]);
-
+        // ... (resto del código de eliminación como lo tenías antes) ...
+        // 3. Obtener el tipo de tercero
+        const { rows: [tercero] } = await client.query('SELECT tipo FROM public.terceros WHERE id = $1 AND workspace_id = $2 FOR UPDATE', [terceroId, workspaceId]); 
+        
         if (!tercero) {
             await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Tercero no encontrado' });
+            return res.status(404).json({ error: 'Tercero no encontrado en este workspace' });
         }
         const tipoTercero = tercero.tipo;
 
-        // --- INICIO DE LA REFACTORIZACIÓN ---
-
-        // 2. Manejar casos especiales y determinar la tabla de rol
+        // 4. Determinar tabla de rol y eliminar dependencias específicas (como antes)
         let tableNameToDelete;
         let idFieldToDelete;
-
-        switch (tipoTercero) {
+        // ... (switch case como antes) ...
+         switch (tipoTercero) {
             case 'cajero':
-                // Manejo del caso especial: eliminar registros dependientes de 'cajero'
-                await client.query('DELETE FROM public.importes_personalizados WHERE id_cajero = $1', [id]);
+                // Si decides eliminar, debe estar DENTRO de la transacción.
+                // ¡Cuidado! Esta tabla podría estar en otro microservicio o necesitar lógica distribuida.
+                // Asumiendo que está localmente por ahora:
+                // await client.query('DELETE FROM public.importes_personalizados WHERE id_cajero = $1 AND workspace_id = $2', [terceroId, workspaceId]);
                 tableNameToDelete = 'cajeros';
                 idFieldToDelete = 'id_cajero';
                 break;
@@ -782,32 +848,45 @@ export const deleteTercero = async (req, res) => {
                 idFieldToDelete = 'id';
                 break;
             default:
-                // Si el tipo no es conocido, no podemos continuar de forma segura.
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: `Tipo de tercero '${tipoTercero}' no es válido para eliminación.` });
         }
 
-        // 3. Eliminar de la tabla de rol específica (lógica unificada)
+
+        // 5. Eliminar de la tabla de rol específica (como antes, con workspace_id)
         if (tableNameToDelete) {
-            const deleteRoleQuery = `DELETE FROM public.${tableNameToDelete} WHERE "${idFieldToDelete}" = $1`;
-            const deleteRoleResult = await client.query(deleteRoleQuery, [id]);
+             const workspaceField = (tableNameToDelete === 'proveedores' || tableNameToDelete === 'rrhh') ? 'workspace_id' : null; // Asume que cajeros no tienen workspace_id directo
+            
+             let deleteRoleQuery;
+             let queryParams = [terceroId];
 
-            // Tu excelente verificación de integridad se mantiene
-            if (deleteRoleResult.rowCount === 0) {
-                await client.query('ROLLBACK');
-                return res.status(500).json({
-                    error: 'Error de integridad de datos',
-                    details: `El tercero ${id} es de tipo '${tipoTercero}' pero no se encontró un registro en la tabla '${tableNameToDelete}'.`,
-                });
-            }
+             if (workspaceField) {
+                 deleteRoleQuery = `DELETE FROM public.${tableNameToDelete} WHERE "${idFieldToDelete}" = $1 AND ${workspaceField} = $2`;
+                 queryParams.push(workspaceId);
+             } else {
+                 // Asumiendo que 'cajeros' también debe filtrarse por workspace indirectamente o directamente
+                 // Si 'cajeros' TIENE workspace_id, cámbialo aquí:
+                 deleteRoleQuery = `DELETE FROM public.${tableNameToDelete} WHERE "${idFieldToDelete}" = $1`; 
+                 // Considera añadir AND workspace_id = $2 si existe en la tabla cajeros
+                 // queryParams.push(workspaceId); 
+             }
+            
+            const deleteRoleResult = await client.query(deleteRoleQuery, queryParams);
+            
+             if (deleteRoleResult.rowCount === 0 && tipoTercero !== 'cajero') { // Ajusta la condición si es necesario
+                 await client.query('ROLLBACK');
+                 return res.status(500).json({
+                     error: 'Error de integridad de datos',
+                     details: `El tercero ${terceroId} es de tipo '${tipoTercero}' pero no se encontró un registro en la tabla '${tableNameToDelete}' para este workspace.`,
+                 });
+             }
         }
-        // --- FIN DE LA REFACTORIZACIÓN ---
 
-        // 4. Finalmente, eliminar el tercero de la tabla maestra. No hay cambios aquí.
-        const resultTercero = await client.query('DELETE FROM public.terceros WHERE id = $1', [id]);
+
+        // 6. Eliminar de la tabla maestra (como antes)
+        const resultTercero = await client.query('DELETE FROM public.terceros WHERE id = $1 AND workspace_id = $2', [terceroId, workspaceId]);
 
         if (resultTercero.rowCount === 0) {
-            // Este caso es muy raro pero es bueno manejarlo
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'El tercero no pudo ser eliminado de la tabla principal.' });
         }
@@ -816,23 +895,23 @@ export const deleteTercero = async (req, res) => {
 
         res.status(200).json({
             message: `Tercero de tipo '${tipoTercero}' eliminado correctamente.`,
-            deletedId: id,
+            deletedId: terceroId,
         });
 
     } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('Error en deleteTercero:', error);
+        // Manejo de errores (ROLLBACK si client existe)
+        if (client) await client.query('ROLLBACK').catch(rollbackError => console.error('Error en ROLLBACK:', rollbackError));
+        console.error(`Error en deleteTercero para terceroId ${terceroId}, workspaceId ${workspaceId}:`, error);
         res.status(500).json({
             error: 'Error interno del servidor al eliminar el tercero',
-            details: error.message,
+            // details: error.message // Opcional
         });
     } finally {
         if (client) {
-            client.release();
+            client.release(); // Liberar cliente de 'terceros'
         }
     }
 };
-
 
 
 export const getTercerosSummary = async (req, res) => {
