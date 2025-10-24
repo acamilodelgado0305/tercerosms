@@ -62,8 +62,6 @@ export const createTercero = async (req, res) => {
             nombre, tipo, tipo_identificacion, numero_identificacion,
             direccion, ciudad, departamento, pais,
             telefono, correo,
-            // --- NUEVO ---
-            // Capturamos las cuentas. Por defecto es un array vacío.
             cuentas_bancarias = [], 
             ...specificData
         } = req.body;
@@ -74,7 +72,7 @@ export const createTercero = async (req, res) => {
 
         const idTercero = uuidv4();
 
-        // 1. Inserción en 'terceros'
+        // 1. Inserción en 'terceros' (Sin cambios)
         const queryTercero = `
             INSERT INTO public.terceros (
                 id, nombre, tipo, tipo_identificacion, numero_identificacion, 
@@ -82,7 +80,6 @@ export const createTercero = async (req, res) => {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *;
         `;
-        
         const valuesTercero = [
             idTercero, nombre, tipo,
             tipo_identificacion || null, numero_identificacion || null,
@@ -90,79 +87,94 @@ export const createTercero = async (req, res) => {
             telefono || {}, correo || {},
             workspaceId
         ];
-
         const { rows: [newTercero] } = await client.query(queryTercero, valuesTercero);
 
-        // 2. Inserción en tablas de detalles (Tu lógica existente)
-        let details = {};
-        if (tipo === 'cajero') {
-            // ... tu lógica de 'cajero' ...
-            const { responsable, comision_porcentaje, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
-            const queryCajero = `
-                INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado)
-                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
-            `;
-            const valuesCajero = [idTercero, responsable || nombre, comision_porcentaje || 0, activo, observaciones, nombre_cajero || nombre, importe_personalizado];
-            const { rows: [result] } = await client.query(queryCajero, valuesCajero);
-            details = result;
-        } else if (tipo === 'proveedor') {
-            // ... tu lógica de 'proveedor' ...
-            const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal } = specificData;
-            const queryProveedor = `
-                INSERT INTO public.proveedores (id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *;
-            `;
-            const valuesProveedor = [idTercero, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal || []];
-            const { rows: [result] } = await client.query(queryProveedor, valuesProveedor);
-            details = result;
-        } else if (tipo === 'rrhh') {
-            // ... tu lógica de 'rrhh' ...
-            const { rut, certificado_bancario, medio_pago, cargo } = specificData;
-            const queryRrhh = `
-                INSERT INTO public.rrhh (id, rut, certificado_bancario, medio_pago, cargo)
-                VALUES ($1, $2, $3, $4, $5) RETURNING *;
-            `;
-            const valuesRrhh = [idTercero, rut, certificado_bancario, medio_pago, cargo];
-            const { rows: [result] } = await client.query(queryRrhh, valuesRrhh);
-            details = result;
-        }
 
-        // --- 3. NUEVO: Inserción en 'cuentas_bancarias_terceros' ---
+        // --- 2. REORDENADO: Insertar Cuentas Bancarias PRIMERO ---
         let createdCuentas = [];
-        if (cuentas_bancarias && cuentas_bancarias.length > 0) {
-            console.log(`Insertando ${cuentas_bancarias.length} cuentas bancarias...`);
-            
-            const queryCuentas = `
-                INSERT INTO public.cuentas_bancarias_terceros
-                  (tercero_id, nombre_banco, numero_cuenta, tipo_cuenta, es_preferida)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING *;
-            `;
+        let preferredAccountString = null; // Variable para guardar el medio de pago
 
-            for (const cuenta of cuentas_bancarias) {
-                // Validación básica
+        if (cuentas_bancarias && cuentas_bancarias.length > 0) {
+            const cuentasValues = cuentas_bancarias.map(cuenta => {
                 if (!cuenta.nombre_banco || !cuenta.numero_cuenta) {
                     throw new Error('Cada cuenta bancaria debe tener al menos nombre_banco y numero_cuenta.');
                 }
-                
-                const valuesCuenta = [
+                return [
                     idTercero,
                     cuenta.nombre_banco,
                     cuenta.numero_cuenta,
                     cuenta.tipo_cuenta || null,
                     cuenta.es_preferida || false
                 ];
-                
-                const { rows: [newCuenta] } = await client.query(queryCuentas, valuesCuenta);
-                createdCuentas.push(newCuenta);
+            });
+
+            // Usamos pg-format para la inserción múltiple segura
+            const queryCuentas = format(`
+                INSERT INTO public.cuentas_bancarias_terceros
+                    (tercero_id, nombre_banco, numero_cuenta, tipo_cuenta, es_preferida)
+                VALUES %L
+                RETURNING *;
+            `, cuentasValues);
+
+            const { rows } = await client.query(queryCuentas);
+            createdCuentas = rows;
+
+            // --- 3. NUEVO: Buscar la cuenta preferida ---
+            const preferredAccount = createdCuentas.find(c => c.es_preferida === true);
+            
+            if (preferredAccount) {
+                // Creamos un string legible para 'medio_pago'
+                // (Ver "Mejor Práctica" abajo para una optimización de esto)
+                preferredAccountString = `${preferredAccount.nombre_banco} - ${preferredAccount.numero_cuenta}`;
             }
+        }
+
+        // --- 4. Preparar el 'medio_pago' final ---
+        // La cuenta preferida (si existe) SOBREESCRIBE 
+        // cualquier 'medio_pago' que viniera en specificData.
+        const medio_pago_final = preferredAccountString || specificData.medio_pago || null;
+
+
+        // --- 5. Inserción en tablas de detalles (AHORA) ---
+        let details = {};
+        
+        if (tipo === 'cajero') {
+            const { responsable, comision_porcentaje, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
+            const queryCajero = `
+                INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado)
+                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
+            `;
+            const valuesCajero = [idTercero, responsable || nombre, comision_porcentaje || 0, activo, observaciones, nombre_cajero || nombre, importe_personalizado];
+            const { rows: [result] } = await client.query(queryCajero, valuesCajero);
+            details = result;
+
+        } else if (tipo === 'proveedor') {
+            const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, responsable_iva, responsabilidad_fiscal } = specificData;
+            const queryProveedor = `
+                INSERT INTO public.proveedores (id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *;
+            `;
+            // Usamos medio_pago_final en $7
+            const valuesProveedor = [idTercero, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago_final, responsable_iva, responsabilidad_fiscal || []];
+            const { rows: [result] } = await client.query(queryProveedor, valuesProveedor);
+            details = result;
+
+        } else if (tipo === 'rrhh') {
+            const { rut, certificado_bancario, cargo } = specificData;
+            const queryRrhh = `
+                INSERT INTO public.rrhh (id, rut, certificado_bancario, medio_pago, cargo)
+                VALUES ($1, $2, $3, $4, $5) RETURNING *;
+            `;
+            // Usamos medio_pago_final en $4
+            const valuesRrhh = [idTercero, rut, certificado_bancario, medio_pago_final, cargo];
+            const { rows: [result] } = await client.query(queryRrhh, valuesRrhh);
+            details = result;
         }
 
         await client.query('COMMIT');
 
         res.status(201).json({
             message: `Tercero de tipo '${tipo}' creado exitosamente.`,
-            // Combinamos el tercero, sus detalles y sus nuevas cuentas en la respuesta
             data: { ...newTercero, ...details, cuentas: createdCuentas } 
         });
 
@@ -527,7 +539,7 @@ export const updateTercero = async (req, res) => {
             UPDATE public.terceros SET
                 nombre = $1, tipo = $2, tipo_identificacion = $3, numero_identificacion = $4,
                 direccion = $5, ciudad = $6, departamento = $7, pais = $8,
-                telefono = $9, correo = $10
+                telefono = $9, correo = $10, fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE id = $11 AND workspace_id = $12
             RETURNING *;
         `;
@@ -546,10 +558,19 @@ export const updateTercero = async (req, res) => {
         ];
         const { rows: [updatedTercero] } = await client.query(updateTerceroQuery, terceroValues);
 
-        // --- 4. SINCRONIZAR 'cuentas_bancarias_terceros' ---
+        // --- 4. SINCRONIZAR 'cuentas_bancarias_terceros' Y CALCULAR MEDIO DE PAGO ---
+        
+        // Valor por defecto (el que viene en el body, si viene)
+        let medio_pago_final = specificData.medio_pago; 
+        // Flag para forzar la actualización del medio_pago
+        let forceMedioPagoUpdate = false; 
+        // Variable para guardar el resultado de las cuentas
+        let finalCuentas = null; 
+
         if (cuentas_bancarias) {
             console.log(`Sincronizando cuentas bancarias para el tercero ${id}...`);
             
+            // --- 4a. Sincronización (INSERT, UPDATE, DELETE) ---
             const queryUpdateCuenta = `
                 UPDATE public.cuentas_bancarias_terceros
                 SET nombre_banco = $1, numero_cuenta = $2, tipo_cuenta = $3, es_preferida = $4, fecha_actualizacion = CURRENT_TIMESTAMP
@@ -557,7 +578,7 @@ export const updateTercero = async (req, res) => {
             `;
             const queryInsertCuenta = `
                 INSERT INTO public.cuentas_bancarias_terceros
-                  (nombre_banco, numero_cuenta, tipo_cuenta, es_preferida, tercero_id)
+                    (nombre_banco, numero_cuenta, tipo_cuenta, es_preferida, tercero_id)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id;
             `;
@@ -574,24 +595,11 @@ export const updateTercero = async (req, res) => {
                 if (cuenta.id && dbAccountIds.has(cuenta.id)) {
                     // UPDATE
                     requestAccountIds.add(cuenta.id);
-                    const values = [
-                        cuenta.nombre_banco,
-                        cuenta.numero_cuenta,
-                        cuenta.tipo_cuenta || null,
-                        cuenta.es_preferida || false,
-                        cuenta.id,
-                        id
-                    ];
+                    const values = [cuenta.nombre_banco, cuenta.numero_cuenta, cuenta.tipo_cuenta || null, cuenta.es_preferida || false, cuenta.id, id];
                     await client.query(queryUpdateCuenta, values);
                 } else {
                     // INSERT
-                    const values = [
-                        cuenta.nombre_banco,
-                        cuenta.numero_cuenta,
-                        cuenta.tipo_cuenta || null,
-                        cuenta.es_preferida || false,
-                        id
-                    ];
+                    const values = [cuenta.nombre_banco, cuenta.numero_cuenta, cuenta.tipo_cuenta || null, cuenta.es_preferida || false, id];
                     const { rows: [inserted] } = await client.query(queryInsertCuenta, values);
                     requestAccountIds.add(inserted.id);
                 }
@@ -599,7 +607,6 @@ export const updateTercero = async (req, res) => {
 
             // DELETE
             const idsToDelete = [...dbAccountIds].filter(dbId => !requestAccountIds.has(dbId));
-            
             if (idsToDelete.length > 0) {
                 console.log(`Eliminando ${idsToDelete.length} cuentas obsoletas...`);
                 await client.query(
@@ -607,6 +614,23 @@ export const updateTercero = async (req, res) => {
                     [idsToDelete]
                 );
             }
+            
+            // --- 4b. Calcular Medio de Pago ---
+            forceMedioPagoUpdate = true; // SÍ, queremos forzar la actualización
+            
+            // Consultamos el estado final de las cuentas
+            const { rows: updatedCuentasList } = await client.query(
+                'SELECT * FROM public.cuentas_bancarias_terceros WHERE tercero_id = $1 ORDER BY fecha_creacion ASC', [id]
+            );
+            finalCuentas = updatedCuentasList; // Guardamos para la respuesta
+
+            const preferredAccount = finalCuentas.find(c => c.es_preferida === true);
+            
+            // Sobrescribimos 'medio_pago_final' con el valor de la cuenta
+            // o con null si ninguna es preferida.
+            medio_pago_final = preferredAccount 
+                ? `${preferredAccount.nombre_banco} - ${preferredAccount.numero_cuenta}` 
+                : null;
         }
 
         // --- 5. MANEJAR ACTUALIZACIÓN DE TABLAS DE DETALLES ---
@@ -614,22 +638,41 @@ export const updateTercero = async (req, res) => {
         const finalType = updatedTercero.tipo;
 
         if (newType && newType !== currentType) {
-            // Lógica para cambio de tipo (Eliminar antiguo, crear nuevo)
+            // --- Lógica para CAMBIO DE TIPO ---
             console.log(`El tipo de tercero cambió de '${currentType}' a '${newType}'. Recreando detalles...`);
+            
+            // 1. Eliminar registro antiguo
             if (currentType === 'cajero') await client.query('DELETE FROM public.cajeros WHERE id_cajero = $1', [id]);
             if (currentType === 'proveedor') await client.query('DELETE FROM public.proveedores WHERE id = $1', [id]);
             if (currentType === 'rrhh') await client.query('DELETE FROM public.rrhh WHERE id = $1', [id]);
 
-            // Crear nuevo (aquí puedes añadir la lógica de inserción para proveedor y rrhh si lo deseas)
+            // 2. Crear registro nuevo (con el medio_pago_final)
             if (finalType === 'cajero') {
                 const { responsable, comision_porcentaje = 0, activo = true, observaciones, nombre_cajero, importe_personalizado = false } = specificData;
                 const { rows: [result] } = await client.query('INSERT INTO public.cajeros (id_cajero, responsable, comision_porcentaje, activo, observaciones, nombre, importe_personalizado) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;', [id, responsable ?? nombre, comision_porcentaje, activo, observaciones, nombre_cajero ?? nombre, importe_personalizado]);
                 details = result;
             }
-            // ... (Añadir lógica INSERT para proveedor y rrhh si es necesario)
+            // --- CORRECCIÓN DE BUG: Lógica de INSERT faltante ---
+            else if (finalType === 'proveedor') {
+                const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, responsable_iva, responsabilidad_fiscal } = specificData;
+                const query = 'INSERT INTO public.proveedores (id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *;';
+                // Usamos medio_pago_final en $7
+                const values = [id, otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, medio_pago_final, responsable_iva, responsabilidad_fiscal || []];
+                const { rows: [result] } = await client.query(query, values);
+                details = result;
+            }
+            else if (finalType === 'rrhh') {
+                const { rut, certificado_bancario, cargo } = specificData;
+                const query = 'INSERT INTO public.rrhh (id, rut, certificado_bancario, medio_pago, cargo) VALUES ($1, $2, $3, $4, $5) RETURNING *;';
+                // Usamos medio_pago_final en $4
+                const values = [id, rut, certificado_bancario, medio_pago_final, cargo];
+                const { rows: [result] } = await client.query(query, values);
+                details = result;
+            }
+            // --- Fin Corrección ---
 
         } else {
-            // Lógica para actualización (El tipo NO cambió)
+            // --- Lógica para ACTUALIZACIÓN (El tipo NO cambió) ---
             console.log(`Actualizando detalles para el tipo '${finalType}'...`);
             
             if (finalType === 'cajero') {
@@ -638,13 +681,10 @@ export const updateTercero = async (req, res) => {
                 details = result;
             }
             
-            // --- 👇 AQUÍ ESTÁ LA CORRECCIÓN ---
             if (finalType === 'proveedor') {
-                const { 
-                    otros_documentos, sitioweb, camara_comercio, rut, 
-                    certificado_bancario, medio_pago, responsable_iva, responsabilidad_fiscal 
-                } = specificData;
+                const { otros_documentos, sitioweb, camara_comercio, rut, certificado_bancario, responsable_iva, responsabilidad_fiscal } = specificData;
                 
+                // Query modificada: $6 (medio_pago) usará el flag
                 const query = `
                     UPDATE public.proveedores 
                     SET 
@@ -653,7 +693,7 @@ export const updateTercero = async (req, res) => {
                         camara_comercio = COALESCE($3, camara_comercio), 
                         rut = COALESCE($4, rut), 
                         certificado_bancario = COALESCE($5, certificado_bancario), 
-                        medio_pago = COALESCE($6, medio_pago), 
+                        medio_pago = ${forceMedioPagoUpdate ? '$6' : 'COALESCE($6, medio_pago)'}, 
                         responsable_iva = COALESCE($7, responsable_iva), 
                         responsabilidad_fiscal = COALESCE($8, responsabilidad_fiscal)
                     WHERE id = $9 
@@ -661,7 +701,9 @@ export const updateTercero = async (req, res) => {
                 `;
                 const values = [
                     otros_documentos, sitioweb, camara_comercio, rut, 
-                    certificado_bancario, medio_pago, responsable_iva, 
+                    certificado_bancario, 
+                    medio_pago_final, // Usamos el valor calculado
+                    responsable_iva, 
                     responsabilidad_fiscal, id
                 ];
                 
@@ -669,21 +711,25 @@ export const updateTercero = async (req, res) => {
                 details = result;
             }
             
-            // --- 👇 Y AQUÍ TAMBIÉN ---
             if (finalType === 'rrhh') {
-                const { rut, certificado_bancario, medio_pago, cargo } = specificData;
+                const { rut, certificado_bancario, cargo } = specificData;
                 
+                // Query modificada: $3 (medio_pago) usará el flag
                 const query = `
                     UPDATE public.rrhh 
                     SET 
                         rut = COALESCE($1, rut), 
                         certificado_bancario = COALESCE($2, certificado_bancario), 
-                        medio_pago = COALESCE($3, medio_pago), 
+                        medio_pago = ${forceMedioPagoUpdate ? '$3' : 'COALESCE($3, medio_pago)'}, 
                         cargo = COALESCE($4, cargo)
                     WHERE id = $5 
                     RETURNING *;
                 `;
-                const values = [rut, certificado_bancario, medio_pago, cargo, id];
+                const values = [
+                    rut, certificado_bancario, 
+                    medio_pago_final, // Usamos el valor calculado
+                    cargo, id
+                ];
 
                 const { rows: [result] } = await client.query(query, values);
                 details = result;
@@ -691,10 +737,14 @@ export const updateTercero = async (req, res) => {
         }
         
         // --- 6. OBTENER ESTADO FINAL ---
-        const { rows: finalCuentas } = await client.query(
-            'SELECT * FROM public.cuentas_bancarias_terceros WHERE tercero_id = $1 ORDER BY fecha_creacion ASC', 
-            [id]
-        );
+        // Optimizamos: solo volvemos a consultar las cuentas si NO se actualizaron.
+        if (finalCuentas === null) {
+            const { rows: currentCuentas } = await client.query(
+                'SELECT * FROM public.cuentas_bancarias_terceros WHERE tercero_id = $1 ORDER BY fecha_creacion ASC', 
+                [id]
+            );
+            finalCuentas = currentCuentas;
+        }
 
         await client.query('COMMIT');
 
