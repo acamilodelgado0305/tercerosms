@@ -1,6 +1,8 @@
 import pool from '../database.js'; // Adjust this path to your actual DB connection pool.
 import { v4 as uuidv4 } from 'uuid'; // Import uuid for generating unique IDs
 import axios from 'axios'; // O tu librería HTTP preferida
+import format from 'pg-format'; // 👈 AÑADE ESTO
+
 
 
 const fetchFullTerceroById = async (id, client) => {
