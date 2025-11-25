@@ -112,37 +112,38 @@ export const getAllCajeros = async (req, res) => {
     try {
         client = await pool.connect();
 
-        // CAMBIO: Añadimos el filtro por workspace_id a la consulta de conteo
+        // Consulta de conteo (sin cambios)
         const totalQuery = `
             SELECT COUNT(*)
             FROM public.terceros t
             INNER JOIN public.cajeros c ON t.id = c.id_cajero
             WHERE t.tipo = 'cajero' AND t.workspace_id = $1;
         `;
-        const totalResult = await client.query(totalQuery, [workspaceId]); // Pasamos el workspaceId
+        const totalResult = await client.query(totalQuery, [workspaceId]);
         const totalItems = parseInt(totalResult.rows[0].count, 10);
         const totalPages = Math.ceil(totalItems / limit);
 
-        // CAMBIO: Añadimos el filtro por workspace_id a la consulta de datos
+        // CAMBIO: Se agregó c.alias en el SELECT
         const dataQuery = `
             SELECT
                 t.id, t.nombre, t.direccion, t.ciudad, t.departamento,
                 t.pais, t.telefono, t.correo,
                 c.responsable AS responsable_cajero, c.comision_porcentaje,
                 c.activo, c.observaciones, c.importe_personalizado,
-                c.nombre AS nombre_asignado_cajero
+                c.nombre AS nombre_asignado_cajero,
+                c.alias -- <--- CAMBIO AQUÍ: Agregamos el alias para el frontend
             FROM
                 public.terceros t
             INNER JOIN
                 public.cajeros c ON t.id = c.id_cajero
             WHERE
-                t.tipo = 'cajero' AND t.workspace_id = $3 -- El tercer parámetro es workspace_id
+                t.tipo = 'cajero' AND t.workspace_id = $3
             ORDER BY
                 t.nombre ASC
             LIMIT $1 OFFSET $2;
         `;
 
-        const dataResult = await client.query(dataQuery, [limit, offset, workspaceId]); // Pasamos los 3 parámetros
+        const dataResult = await client.query(dataQuery, [limit, offset, workspaceId]);
 
         res.status(200).json({
             message: 'Cajeros obtenidos exitosamente.',
