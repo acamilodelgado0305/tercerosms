@@ -377,6 +377,69 @@ export const getTerceros = async (req, res) => {
     }
 };
 
+
+
+export const searchTerceros = async (req, res) => {
+  try {
+    const { q, type, limit = 10 } = req.query;
+    const { workspaceId } = req.user; // Asegúrate de que tu middleware guarde esto como workspaceId
+
+    // 1. Debugging: Ver qué está llegando
+    console.log("--- BÚSQUEDA TERCEROS ---");
+    console.log("Workspace:", workspaceId);
+    console.log("Query (q):", q);
+    console.log("Type:", type);
+
+    // Validación básica
+    if (!q || q.trim().length < 2) {
+      return res.status(200).json({ data: [], count: 0 });
+    }
+
+    const searchTerm = `%${q.trim()}%`;
+    
+    // 2. Construcción Dinámica de la Consulta
+    // Inicia con los parámetros básicos
+    let sqlQuery = `
+      SELECT id, nombre, tipo, tipo_identificacion, numero_identificacion, correo, telefono
+      FROM public.terceros
+      WHERE workspace_id = $1
+        AND (
+            nombre ILIKE $2 OR 
+            numero_identificacion ILIKE $2
+        )
+    `;
+    
+    let queryValues = [workspaceId, searchTerm];
+
+    // 3. Lógica del Filtro de Tipo (Corregida)
+    // Si type existe Y no es "all" (en cualquier combinación de mayúsculas/minúsculas)
+    if (type && type.toLowerCase() !== 'all') {
+        sqlQuery += ` AND tipo = $3`; // Agregamos el filtro
+        queryValues.push(type);       // Agregamos el valor (ej: 'proveedor')
+    }
+
+    // Agregamos orden y límite (nota: el índice del límite cambia si agregamos tipo)
+    const limitIndex = queryValues.length + 1;
+    sqlQuery += ` ORDER BY nombre ASC LIMIT $${limitIndex}`;
+    queryValues.push(limit);
+
+    console.log("SQL Generado:", sqlQuery);
+    console.log("Valores:", queryValues);
+
+    // 4. Ejecutar
+    const { rows } = await pool.query(sqlQuery, queryValues);
+
+    return res.status(200).json({
+      data: rows,
+      count: rows.length
+    });
+
+  } catch (error) {
+    console.error('Error en searchTerceros:', error);
+    return res.status(500).json({ error: 'Error interno al buscar terceros.' });
+  }
+};
+
 export const getAllCajeros = async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 25;
