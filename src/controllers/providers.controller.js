@@ -1,33 +1,33 @@
 import { v4 as uuidv4 } from 'uuid';
 import pool from '../database.js'; // Asegúrate que la ruta sea correcta
 
-export const getProveedoresYRRHH = async (req, res) => {
-    // 1. Obtenemos el workspaceId (tu lógica es correcta)
+// Renombramos la función para reflejar que trae TODO el universo de terceros
+export const getAllTerceros = async (req, res) => {
     const { workspaceId } = req.user;
     let client;
 
     try {
         client = await pool.connect();
 
-        // --- INICIO DE LA CORRECCIÓN: Consulta SQL con Subquery ---
         const dataQuery = `
             SELECT
                 t.id,
                 t.nombre,
-                t.tipo,
+                t.tipo,               -- Nota: Importante para filtrar en el Frontend si es necesario
                 t.tipo_identificacion,
                 t.numero_identificacion,
-                -- 3. Usamos COALESCE para convertir el NULL (de terceros sin cuentas) en un array vacío '[]'
+                t.telefono,           -- Sugerencia: suele ser útil en listados generales
+                t.correo,              -- Sugerencia: suele ser útil en listados generales
+                -- COALESCE asegura que el frontend siempre reciba un array, nunca null
                 COALESCE(cuentas_agg.cuentas, '[]'::jsonb) as cuentas
             
             FROM public.terceros t
             
-            -- 2. Hacemos LEFT JOIN a nuestra subconsulta que ya tiene las cuentas agregadas
+            -- Subconsulta optimizada para agregar cuentas bancarias (relación 1:N)
             LEFT JOIN (
                 SELECT
                     c.tercero_id,
                     jsonb_agg(
-                        -- Aquí construimos el objeto JSON para CADA cuenta
                         jsonb_build_object(
                             'id', c.id,
                             'nombre_banco', c.nombre_banco,
@@ -35,47 +35,48 @@ export const getProveedoresYRRHH = async (req, res) => {
                             'tipo_cuenta', c.tipo_cuenta,
                             'es_preferida', c.es_preferida
                         )
-                        -- Ordenamos las cuentas DENTRO del array JSON (opcional pero recomendado)
                         ORDER BY c.es_preferida DESC, c.fecha_creacion ASC
                     ) as cuentas
                 FROM public.cuentas_bancarias_terceros c
-                -- Agrupamos solo la subconsulta de cuentas
                 GROUP BY c.tercero_id
             ) as cuentas_agg ON t.id = cuentas_agg.tercero_id
             
-            -- 1. Filtramos la tabla principal de terceros (tu lógica original)
-            WHERE 
-                t.workspace_id = $1 AND t.tipo IN ('proveedor', 'rrhh')
+            -- CAMBIO CRÍTICO: Eliminamos el filtro "AND t.tipo IN (...)"
+            -- Ahora solo filtramos por el entorno de trabajo (Multitenancy)
+            WHERE t.workspace_id = $1 
                 
             ORDER BY t.nombre ASC;
         `;
-        // --- FIN DE LA CORRECCIÓN ---
 
         const dataResult = await client.query(dataQuery, [workspaceId]);
         
-        // La lógica de formateo ahora incluye las cuentas
+        // Mapeo de respuesta
         const datosFormateados = dataResult.rows.map(row => ({
             id: row.id,
             nombre: row.nombre,
-            tipo: row.tipo,
+            tipo: row.tipo, // 'cliente', 'proveedor', 'rrhh', 'otros'
             identificacion: {
                 tipo: row.tipo_identificacion,
                 numero: row.numero_identificacion
             },
-            cuentas: row.cuentas // <-- ¡Aquí está el nuevo array de cuentas!
+            contacto: { // Agrupamos datos de contacto para limpieza
+                email: row.email || null,
+                telefono: row.telefono || null
+            },
+            cuentas: row.cuentas
         }));
 
         res.status(200).json({
-            message: 'Lista simplificada de Proveedores y RRHH obtenida exitosamente.',
+            message: 'Directorio global de terceros obtenido exitosamente.',
             totalItems: dataResult.rowCount,
             data: datosFormateados,
         });
 
     } catch (error) {
-        console.error('Error en getProveedoresYRRHH:', error); 
+        console.error('Error en getAllTerceros:', error); 
         res.status(500).json({
-            error: 'Ocurrió un error inesperado al obtener la lista simplificada de terceros.',
-            details: error.message
+            error: 'Error crítico al consultar el directorio de terceros.',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     } finally {
         if (client) {
